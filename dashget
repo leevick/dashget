@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+from pathlib import Path
+import isodate
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
+
+# Global lock for thread-safe printing
+print_lock = threading.Lock()
+
+def thread_safe_print(*args, **kwargs):
+    """Thread-safe print function."""
+    with print_lock:
+        print(*args, **kwargs)
+
+def replace_dash_template(template, rep_id, number=None):
+    """Replace DASH template variables with actual values."""
+    result = template.replace('$RepresentationID$', rep_id)
+    
+    if number is not None:
+        # Handle $Number$ variations like $Number%04d$
+        import re
+        number_pattern = r'\$Number(?:%(\d+)d)?\$'
+        
+        def number_replacer(match):
+            format_spec = match.group(1)
+            if format_spec:
+                # Use zero-padding format like %04d
+                return f"{number:0{int(format_spec)}d}"
+            else:
+                return str(number)
+        
+        result = re.sub(number_pattern, number_replacer, result)
+    
+    return result
+
+def parse_duration(duration_str):
+    """Parse various duration formats and return duration in seconds."""
+    if not duration_str:
+        return 0
+    
+    # Handle ISO 8601 duration formats like PT634.566S, PT12M14S, etc.
+    if duration_str.startswith('PT'):
+        try:
+            duration = isodate.parse_duration(duration_str)
+            return duration.total_seconds()
+        except Exception:
+            pass
+    
+    # Handle format like "0H12M14.000" (hours, minutes, seconds)
+    hms_pattern = r'(\d+)H(\d+)M([\d.]+)'
+    match = re.match(hms_pattern, duration_str)
+    if match:
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        seconds = float(match.group(3))
+        return hours * 3600 + minutes * 60 + seconds
+    
+    # Handle simple seconds format
+    try:
+        return float(duration_str)
+    except ValueError:
+        pass
+    
+    print(f"Warning: Could not parse duration '{duration_str}', using 0")
+    return 0
+
+def get_remote_file_size(url):
+    """Get the size of a remote file using HEAD request."""
+    try:
+        req = urllib.request.Request(url, method='HEAD')
+        with urllib.request.urlopen(req) as response:
+            content_length = response.headers.get('Content-Length')
+            return int(content_length) if content_length else None
+    except Exception:
+        return None
+
+def download_file(url, filepath, force_download=False, silent=False):
+    """Download a file from URL to filepath, creating directories as needed."""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    # Check if file already exists and is complete
+    if not force_download and os.path.exists(filepath):
+        local_size = os.path.getsize(filepath)
+        remote_size = get_remote_file_size(url)
+        
+        if remote_size is not None and local_size == remote_size:
+            if not silent:
+                thread_safe_print(f"Skipping (already complete): {filepath}")
+            return True
+        elif remote_size is not None:
+            if not silent:
+                thread_safe_print(f"File size mismatch: {filepath} (local: {local_size}, remote: {remote_size})")
+                thread_safe_print(f"Re-downloading: {url} -> {filepath}")
+        else:
+            if not silent:
+                thread_safe_print(f"Cannot verify size, re-downloading: {url} -> {filepath}")
+    else:
+        if not silent:
+            thread_safe_print(f"Downloading: {url} -> {filepath}")
+    
+    try:
+        urllib.request.urlretrieve(url, filepath)
+        return True
+    except Exception as e:
+        thread_safe_print(f"Error downloading {url}: {e}")
+        return False
+
+def download_representation_segments(mpd_url, base_url, rep_id, media_template, init_template, start_number, num_segments):
+    """Download all segments for a single representation sequentially."""
+    downloaded_count = 0
+    failed_count = 0
+    
+    # Download initialization segment if exists
+    if init_template:
+        init_url_path = replace_dash_template(init_template, rep_id)
+        init_url = urllib.parse.urljoin(mpd_url, base_url + init_url_path)
+        if download_file(init_url, init_url_path):
+            downloaded_count += 1
+        else:
+            failed_count += 1
+    
+    # Download media segments with resume logic
+    if media_template:
+        # Find the range of segments to download
+        start_segment = start_number
+        end_segment = start_number + num_segments
+        
+        # Check for existing segments and find resume point
+        last_existing_segment = None
+        for segment_num in range(start_segment, end_segment):
+            media_url_path = replace_dash_template(media_template, rep_id, segment_num)
+            if os.path.exists(media_url_path):
+                last_existing_segment = segment_num
+            else:
+                break
+        
+        # If we found existing segments, verify the last one
+        if last_existing_segment is not None:
+            # Check if the last existing segment is complete
+            last_media_url_path = replace_dash_template(media_template, rep_id, last_existing_segment)
+            last_media_url = urllib.parse.urljoin(mpd_url, base_url + last_media_url_path)
+            
+            thread_safe_print(f"[Rep {rep_id}] Found existing segments up to #{last_existing_segment}")
+            thread_safe_print(f"[Rep {rep_id}] Verifying last segment: {last_media_url_path}")
+            
+            # Force re-download of the last segment to verify it's complete
+            if not download_file(last_media_url, last_media_url_path, force_download=True):
+                thread_safe_print(f"[Rep {rep_id}] Failed to verify/download last segment: {last_media_url_path}")
+                failed_count += 1
+            else:
+                downloaded_count += 1
+            
+            # Start downloading from the next segment
+            start_segment = last_existing_segment + 1
+        
+        # Download remaining segments
+        for segment_num in range(start_segment, end_segment):
+            media_url_path = replace_dash_template(media_template, rep_id, segment_num)
+            media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
+            
+            if download_file(media_url, media_url_path):
+                downloaded_count += 1
+            else:
+                thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
+                failed_count += 1
+                # Continue with next segment instead of stopping
+    
+    thread_safe_print(f"[Rep {rep_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
+    return downloaded_count, failed_count
+
+def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
+    """Parse MPD content and download all segments using parallel processing."""
+    # Parse the XML
+    root = ET.fromstring(mpd_content)
+    
+    # Define namespaces
+    ns = {'mpd': 'urn:mpeg:dash:schema:mpd:2011'}
+    
+    # Get base URL
+    base_url_elem = root.find('.//mpd:BaseURL', ns)
+    base_url = base_url_elem.text if base_url_elem is not None else './'
+    
+    # Parse MPD duration and calculate number of segments
+    duration_attr = root.get('mediaPresentationDuration', 'PT0S')
+    total_duration = parse_duration(duration_attr)
+    
+    # Find all adaptation sets
+    adaptation_sets = root.findall('.//mpd:AdaptationSet', ns)
+    
+    # Collect all download tasks
+    download_tasks = []
+    
+    for adaptation_set in adaptation_sets:
+        # Get segment template
+        segment_template = adaptation_set.find('.//mpd:SegmentTemplate', ns)
+        if segment_template is None:
+            continue
+            
+        duration = int(segment_template.get('duration', 0))
+        timescale = int(segment_template.get('timescale', 1))
+        start_number = int(segment_template.get('startNumber', 1))
+        media_template = segment_template.get('media', '')
+        init_template = segment_template.get('initialization', '')
+        
+        # Calculate segment duration in seconds
+        segment_duration = duration / timescale
+        
+        # Calculate total number of segments
+        if segment_duration > 0:
+            num_segments = int(total_duration / segment_duration) + 1
+        else:
+            num_segments = 1
+        
+        # Find all representations in this adaptation set
+        representations = adaptation_set.findall('.//mpd:Representation', ns)
+        
+        for representation in representations:
+            rep_id = representation.get('id')
+            
+            # Add download task for this representation
+            download_tasks.append({
+                'mpd_url': mpd_url,
+                'base_url': base_url,
+                'rep_id': rep_id,
+                'media_template': media_template,
+                'init_template': init_template,
+                'start_number': start_number,
+                'num_segments': num_segments
+            })
+    
+    # Execute downloads in parallel (one thread per representation)
+    total_downloaded = 0
+    total_failed = 0
+    
+    thread_safe_print(f"Starting parallel downloads with {min(max_threads, len(download_tasks))} threads...")
+    thread_safe_print(f"Total representations to download: {len(download_tasks)}")
+    
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        # Submit all download tasks
+        future_to_task = {
+            executor.submit(
+                download_representation_segments,
+                task['mpd_url'],
+                task['base_url'],
+                task['rep_id'],
+                task['media_template'],
+                task['init_template'],
+                task['start_number'],
+                task['num_segments']
+            ): task for task in download_tasks
+        }
+        
+        # Process completed tasks
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            try:
+                downloaded, failed = future.result()
+                total_downloaded += downloaded
+                total_failed += failed
+            except Exception as e:
+                thread_safe_print(f"[Rep {task['rep_id']}] Exception occurred: {e}")
+                total_failed += 1
+    
+    thread_safe_print(f"\nDownload summary:")
+    thread_safe_print(f"Total files downloaded: {total_downloaded}")
+    thread_safe_print(f"Total files failed: {total_failed}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Download DASH video segments')
+    parser.add_argument('dash_url', help='URL of the DASH manifest (.mpd file)')
+    parser.add_argument('-t', '--threads', type=int, default=4, 
+                       help='Maximum number of parallel download threads (default: 4)')
+    parser.add_argument('--max-threads', type=int, dest='threads',
+                       help='Alias for --threads')
+    
+    args = parser.parse_args()
+    
+    # Validate thread count
+    if args.threads < 1:
+        print("Error: Thread count must be at least 1")
+        sys.exit(1)
+    if args.threads > 16:
+        print("Warning: Using more than 16 threads may put excessive load on the server")
+    
+    dash_url = args.dash_url
+    max_threads = args.threads
+    
+    # Extract manifest filename from URL
+    manifest_filename = os.path.basename(urllib.parse.urlparse(dash_url).path)
+    if not manifest_filename:
+        manifest_filename = "manifest.mpd"
+    
+    print(f"Downloading DASH manifest from: {dash_url}")
+    print(f"Using {max_threads} parallel download threads")
+    
+    try:
+        # Download the manifest
+        with urllib.request.urlopen(dash_url) as response:
+            mpd_content = response.read().decode('utf-8')
+        
+        # Save manifest to current directory
+        with open(manifest_filename, 'w') as f:
+            f.write(mpd_content)
+        print(f"Manifest saved as: {manifest_filename}")
+        
+        # Parse and download segments
+        parse_mpd_and_download_segments(dash_url, mpd_content, max_threads)
+        
+        print("Download complete!")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
