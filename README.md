@@ -29,8 +29,10 @@ Analyzes fMP4 DASH representations using Bento4's mp4dump tool. Generates detail
 - **Automatic fMP4 Detection**: Identifies and processes only fMP4 format representations
 - **Selective Processing**: Process all representations or filter by specific IDs
 - **Structure Analysis**: Generates detailed MP4 box structure dumps with file offsets
+- **Binary Concatenation**: Creates playable concatenated media files from all segments
+- **Hexdump Generation**: Produces hexdump output for low-level debugging
 - **Smart File Discovery**: Automatically finds MPD manifests and segments in directories
-- **Centralized Output**: Saves all dump files in the manifest directory for easy access
+- **Centralized Output**: Saves all output files in the manifest directory for easy access
 
 ## Installation
 
@@ -125,8 +127,10 @@ chmod +x dashget dashdump
 
 #### Output Files
 
-For each processed representation with ID `{rep_id}`, a dump file is created in the same directory as the manifest:
-- `{rep_id}.dump` - Detailed MP4 box structure with file offsets (saved in manifest directory)
+For each processed representation with ID `{rep_id}`, the following files are created in the same directory as the manifest:
+- `{rep_id}.dump` - Detailed MP4 box structure with file offsets and segment filenames
+- `{rep_id}.m4s` - Concatenated binary file (init segment + all media segments)
+- `{rep_id}.hex` - Hexdump of the concatenated binary file (for debugging)
 
 #### Examples
 
@@ -200,12 +204,14 @@ The tool creates a directory structure matching the DASH manifest organization:
 
 ### dashdump Output
 
-For each representation, a dump file is created in the same directory as the manifest:
+For each representation, three files are created in the same directory as the manifest:
 - **Dump file** (`{rep_id}.dump`): Text file with detailed MP4 structure including:
   - Box hierarchy and types
   - File offsets in decimal and hexadecimal with segment filenames
   - Box sizes and attributes
   - Sample information
+- **Concatenated file** (`{rep_id}.m4s`): Binary file with all segments combined (playable)
+- **Hexdump file** (`{rep_id}.hex`): Hexadecimal dump of the concatenated file for debugging
 
 ## Thread Safety
 

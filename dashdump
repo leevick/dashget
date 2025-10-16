@@ -123,11 +123,15 @@ def concat_and_dump_representation(directory, rep_info):
     
     # Save dump file in the same directory as the manifest
     dump_file = os.path.join(directory, f'{rep_id}.dump')
+    concat_file = os.path.join(directory, f'{rep_id}.m4s')
+    hex_file = os.path.join(directory, f'{rep_id}.hex')
     
     # Get init segment path for finding the file
     init_path = replace_dash_template(init_template, rep_id)
     
     print(f"Dump file: {dump_file}")
+    print(f"Concat file: {concat_file}")
+    print(f"Hex file: {hex_file}")
     
     # Check if mp4dump command exists
     try:
@@ -155,6 +159,11 @@ def concat_and_dump_representation(directory, rep_info):
                                   capture_output=True, text=True)
             dump.write(result.stdout)
         
+        # Concatenate init segment to binary file
+        with open(concat_file, 'wb') as concat:
+            with open(init_file, 'rb') as init:
+                concat.write(init.read())
+        
         offset += init_size
     else:
         print(f"Warning: Init segment not found: {init_file}")
@@ -173,11 +182,12 @@ def concat_and_dump_representation(directory, rep_info):
     # Find all matching segment files
     segment_files = find_segment_files(directory, media_pattern)
     
-    # Filter out our own output files (dump and any old concatenated m4s files in manifest dir)
+    # Filter out our own output files (dump, m4s, and hex files in manifest dir)
     output_dump = os.path.join(directory, f'{rep_id}.dump')
     output_m4s = os.path.join(directory, f'{rep_id}.m4s')
+    output_hex = os.path.join(directory, f'{rep_id}.hex')
     segment_files = [f for f in segment_files 
-                     if os.path.abspath(f) not in [output_dump, output_m4s]]
+                     if os.path.abspath(f) not in [output_dump, output_m4s, output_hex]]
     
     if not segment_files:
         print(f"Warning: No media segments found matching pattern: {media_pattern}")
@@ -199,10 +209,30 @@ def concat_and_dump_representation(directory, rep_info):
                                   capture_output=True, text=True)
             dump.write(result.stdout)
         
+        # Append to concat file
+        with open(concat_file, 'ab') as concat:
+            with open(seg_file, 'rb') as segment:
+                concat.write(segment.read())
+        
         offset += seg_size
     
     print(f"\nTotal file size: {offset} bytes (0x{offset:x})")
+    
+    # Generate hexdump
+    print(f"Generating hexdump...")
+    try:
+        with open(hex_file, 'w') as hex_out:
+            subprocess.run(['hexdump', '-C', concat_file], 
+                          stdout=hex_out, 
+                          check=True)
+        print(f"✓ Hexdump saved to: {hex_file}")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Failed to generate hexdump: {e}")
+    except FileNotFoundError:
+        print(f"Warning: hexdump command not found, skipping hex file generation")
+    
     print(f"✓ Dump saved to: {dump_file}")
+    print(f"✓ Concatenated file saved to: {concat_file}")
     
     return True
 
