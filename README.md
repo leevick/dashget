@@ -8,7 +8,7 @@ A Python toolkit for working with DASH (Dynamic Adaptive Streaming over HTTP) vi
 
 Downloads DASH video segments from MPD manifests with multi-threaded support and resume capability.
 
-### mp4dump - fMP4 Representation Analyzer
+### dashdump - fMP4 Representation Analyzer
 
 Analyzes fMP4 DASH representations using Bento4's mp4dump tool. Generates detailed MP4 structure dumps for each representation.
 
@@ -24,7 +24,7 @@ Analyzes fMP4 DASH representations using Bento4's mp4dump tool. Generates detail
 - **Duration Parsing**: Supports multiple duration formats including ISO 8601
 - **Thread-safe Output**: Coordinated output from multiple download threads
 
-### mp4dump Features
+### dashdump Features
 
 - **Automatic fMP4 Detection**: Identifies and processes only fMP4 format representations
 - **Selective Processing**: Process all representations or filter by specific IDs
@@ -46,7 +46,7 @@ Analyzes fMP4 DASH representations using Bento4's mp4dump tool. Generates detail
 pip install isodate
 ```
 
-### Install Bento4 (for mp4dump)
+### Install Bento4 (for dashdump)
 
 ```bash
 # On Ubuntu/Debian
@@ -61,7 +61,7 @@ brew install bento4
 ### Make Scripts Executable
 
 ```bash
-chmod +x dashget mp4dump
+chmod +x dashget dashdump
 ```
 
 ## Usage
@@ -99,23 +99,23 @@ chmod +x dashget mp4dump
 - `-t, --threads`: Maximum number of parallel download threads (default: 4)
 - `--max-threads`: Alias for `--threads`
 
-### mp4dump - Analyze and Concatenate fMP4 Representations
+### dashdump - Analyze and Concatenate fMP4 Representations
 
 #### Basic Usage
 
 ```bash
 # Process all fMP4 representations in current directory
-./mp4dump
+./dashdump
 
 # Process all fMP4 representations in specific directory
-./mp4dump -d /path/to/dash/content
+./dashdump -d /path/to/dash/content
 
 # Process specific representation(s) by ID
-./mp4dump -r 1
-./mp4dump -r 1 2 3
+./dashdump -r 1
+./dashdump -r 1 2 3
 
 # Combine options
-./mp4dump -d /path/to/dash/content -r 2
+./dashdump -d /path/to/dash/content -r 2
 ```
 
 #### Command Line Options
@@ -133,16 +133,16 @@ For each processed representation with ID `{rep_id}`, a dump file is created in 
 ```bash
 # After downloading with dashget, analyze all representations
 ./dashget https://example.com/video/manifest.mpd
-./mp4dump
+./dashdump
 
 # Only analyze video representation "1"
-./mp4dump -r 1
+./dashdump -r 1
 
 # Process multiple specific representations
-./mp4dump -r video1 audio1
+./dashdump -r video1 audio1
 
 # Work with content in different directory
-./mp4dump -d ~/Downloads/dash_content -r 2
+./dashdump -d ~/Downloads/dash_content -r 2
 ```
 
 ## Workflow Example
@@ -154,10 +154,10 @@ Complete workflow for downloading and analyzing DASH content:
 ./dashget https://example.com/video/manifest.mpd
 
 # 2. Analyze all fMP4 representations
-./mp4dump
+./dashdump
 
 # 3. Or analyze specific representation
-./mp4dump -r video1
+./dashdump -r video1
 
 # 4. View the generated dump file (saved in manifest directory)
 less video1.dump
@@ -177,7 +177,7 @@ less video1.dump
 4. **Downloads segments in parallel** using configurable thread pool
 5. **Verifies completeness** and resumes interrupted downloads
 
-### mp4dump Workflow
+### dashdump Workflow
 
 1. **Locates MPD manifest** in the specified directory
 2. **Parses manifest** to identify all representations
@@ -198,7 +198,7 @@ The tool creates a directory structure matching the DASH manifest organization:
 - Downloads initialization segments and media segments
 - Provides progress output and download summary
 
-### mp4dump Output
+### dashdump Output
 
 For each representation, a dump file is created in the same directory as the manifest:
 - **Dump file** (`{rep_id}.dump`): Text file with detailed MP4 structure including:
@@ -220,7 +220,7 @@ DashGet uses thread-safe mechanisms for:
 - File size verification and re-download when needed
 - Detailed error reporting for failed downloads
 - Automatic retry logic for incomplete segments
-- Skip non-fMP4 representations in mp4dump
+- Skip non-fMP4 representations in dashdump
 - Validation of required tools (mp4dump command)
 
 ## Contributing
