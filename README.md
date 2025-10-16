@@ -203,7 +203,7 @@ The tool creates a directory structure matching the DASH manifest organization:
 For each representation, a dump file is created in the same directory as the manifest:
 - **Dump file** (`{rep_id}.dump`): Text file with detailed MP4 structure including:
   - Box hierarchy and types
-  - File offsets in decimal and hexadecimal
+  - File offsets in decimal and hexadecimal with segment filenames
   - Box sizes and attributes
   - Sample information
 

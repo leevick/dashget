@@ -145,9 +145,12 @@ def concat_and_dump_representation(directory, rep_info):
         print(f"\nProcessing init segment: {init_file}")
         print(f"=== File offset: {offset} (0x{offset:x}) ===")
         
+        # Get init segment filename
+        init_filename = os.path.basename(init_file)
+        
         # Dump init segment
         with open(dump_file, 'w') as dump:
-            dump.write(f"=== File offset: {offset} (0x{offset:x}) ===\n")
+            dump.write(f"=== File offset: {offset} (0x{offset:x}) - {init_filename} ===\n")
             result = subprocess.run(['mp4dump', '--verbosity', '3', init_file], 
                                   capture_output=True, text=True)
             dump.write(result.stdout)
@@ -191,7 +194,7 @@ def concat_and_dump_representation(directory, rep_info):
         
         # Append to dump file
         with open(dump_file, 'a') as dump:
-            dump.write(f"\n=== File offset: {offset} (0x{offset:x}) ===\n")
+            dump.write(f"\n=== File offset: {offset} (0x{offset:x}) - {seg_name} ===\n")
             result = subprocess.run(['mp4dump', '--verbosity', '3', seg_file],
                                   capture_output=True, text=True)
             dump.write(result.stdout)
