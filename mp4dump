@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import argparse
+import xml.etree.ElementTree as ET
+import subprocess
+from pathlib import Path
+import glob
+
+def find_mpd_file(directory):
+    """Find the MPD manifest file in the given directory."""
+    mpd_files = list(Path(directory).glob('*.mpd'))
+    if not mpd_files:
+        return None
+    if len(mpd_files) > 1:
+        print(f"Warning: Multiple MPD files found, using: {mpd_files[0]}")
+    return mpd_files[0]
+
+def is_fmp4_representation(representation):
+    """Check if a representation is in fMP4 format."""
+    # Check mimeType for fMP4 indicators
+    mime_type = representation.get('mimeType', '')
+    if 'mp4' in mime_type.lower():
+        return True
+    
+    # Check parent AdaptationSet mimeType
+    parent = representation.find('..')
+    if parent is not None:
+        parent_mime = parent.get('mimeType', '')
+        if 'mp4' in parent_mime.lower():
+            return True
+    
+    # Check for SegmentTemplate/SegmentList which indicates DASH
+    # fMP4 typically uses fragmented MP4 with initialization segments
+    if representation.find('.//SegmentTemplate') is not None:
+        return True
+    if representation.find('.//SegmentList') is not None:
+        return True
+    
+    return False
+
+def get_representation_info(mpd_path, rep_ids=None):
+    """Parse MPD and extract representation information."""
+    tree = ET.parse(mpd_path)
+    root = tree.getroot()
+    
+    # Handle XML namespaces
+    namespaces = {'mpd': 'urn:mpeg:dash:schema:mpd:2011'}
+    if root.tag.startswith('{'):
+        ns = root.tag[1:root.tag.index('}')]
+        namespaces['mpd'] = ns
+    
+    representations = []
+    
+    # Find all representations
+    for period in root.findall('.//mpd:Period', namespaces):
+        for adaptation_set in period.findall('.//mpd:AdaptationSet', namespaces):
+            for rep in adaptation_set.findall('.//mpd:Representation', namespaces):
+                rep_id = rep.get('id')
+                
+                # Skip if specific IDs requested and this isn't one of them
+                if rep_ids and rep_id not in rep_ids:
+                    continue
+                
+                # Check if fMP4
+                mime_type = rep.get('mimeType') or adaptation_set.get('mimeType', '')
+                
+                # Look for segment template
+                seg_template = rep.find('.//mpd:SegmentTemplate', namespaces)
+                if seg_template is None:
+                    seg_template = adaptation_set.find('.//mpd:SegmentTemplate', namespaces)
+                
+                if seg_template is not None:
+                    media_template = seg_template.get('media', '')
+                    init_template = seg_template.get('initialization', '')
+                    start_number = int(seg_template.get('startNumber', '1'))
+                    
+                    representations.append({
+                        'id': rep_id,
+                        'mime_type': mime_type,
+                        'media_template': media_template,
+                        'init_template': init_template,
+                        'start_number': start_number
+                    })
+    
+    return representations
+
+def replace_dash_template(template, rep_id, number=None):
+    """Replace DASH template variables with actual values."""
+    import re
+    result = template.replace('$RepresentationID$', rep_id)
+    
+    if number is not None:
+        number_pattern = r'\$Number(?:%(\d+)d)?\$'
+        
+        def number_replacer(match):
+            format_spec = match.group(1)
+            if format_spec:
+                return f"{number:0{int(format_spec)}d}"
+            else:
+                return str(number)
+        
+        result = re.sub(number_pattern, number_replacer, result)
+    
+    return result
+
+def find_segment_files(directory, pattern):
+    """Find all segment files matching a pattern."""
+    return sorted(glob.glob(os.path.join(directory, pattern)))
+
+def concat_and_dump_representation(directory, rep_info):
+    """Concatenate and dump a single representation using mp4dump."""
+    rep_id = rep_info['id']
+    init_template = rep_info['init_template']
+    media_template = rep_info['media_template']
+    start_number = rep_info['start_number']
+    
+    print(f"\n{'='*60}")
+    print(f"Processing Representation: {rep_id}")
+    print(f"MIME Type: {rep_info['mime_type']}")
+    print(f"{'='*60}")
+    
+    # Save dump file in the same directory as the manifest
+    dump_file = os.path.join(directory, f'{rep_id}.dump')
+    
+    # Get init segment path for finding the file
+    init_path = replace_dash_template(init_template, rep_id)
+    
+    print(f"Dump file: {dump_file}")
+    
+    # Check if mp4dump command exists
+    try:
+        subprocess.run(['which', 'mp4dump'], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        print(f"Error: mp4dump command not found. Please install Bento4 tools.")
+        return False
+    
+    offset = 0
+    
+    # Process initialization segment
+    init_file = os.path.join(directory, init_path)
+    if os.path.exists(init_file):
+        init_size = os.path.getsize(init_file)
+        print(f"\nProcessing init segment: {init_file}")
+        print(f"=== File offset: {offset} (0x{offset:x}) ===")
+        
+        # Dump init segment
+        with open(dump_file, 'w') as dump:
+            dump.write(f"=== File offset: {offset} (0x{offset:x}) ===\n")
+            result = subprocess.run(['mp4dump', '--verbosity', '3', init_file], 
+                                  capture_output=True, text=True)
+            dump.write(result.stdout)
+        
+        offset += init_size
+    else:
+        print(f"Warning: Init segment not found: {init_file}")
+        return False
+    
+    # Find and process media segments
+    # Convert template to glob pattern
+    # First replace $Number%04d$ (or similar) with just *, then replace $RepresentationID$
+    import re
+    media_pattern = media_template
+    # Replace $Number with optional format specifier with *
+    media_pattern = re.sub(r'\$Number(?:%\d+d)?\$', '*', media_pattern)
+    # Replace $RepresentationID$ with actual ID
+    media_pattern = media_pattern.replace('$RepresentationID$', rep_id)
+    
+    # Find all matching segment files
+    segment_files = find_segment_files(directory, media_pattern)
+    
+    # Filter out our own output files (dump and any old concatenated m4s files in manifest dir)
+    output_dump = os.path.join(directory, f'{rep_id}.dump')
+    output_m4s = os.path.join(directory, f'{rep_id}.m4s')
+    segment_files = [f for f in segment_files 
+                     if os.path.abspath(f) not in [output_dump, output_m4s]]
+    
+    if not segment_files:
+        print(f"Warning: No media segments found matching pattern: {media_pattern}")
+        return False
+    
+    print(f"\nFound {len(segment_files)} media segments")
+    
+    # Process each segment
+    for seg_file in segment_files:
+        seg_size = os.path.getsize(seg_file)
+        seg_name = os.path.basename(seg_file)
+        
+        print(f"Processing: {seg_name} ({seg_size} bytes)")
+        
+        # Append to dump file
+        with open(dump_file, 'a') as dump:
+            dump.write(f"\n=== File offset: {offset} (0x{offset:x}) ===\n")
+            result = subprocess.run(['mp4dump', '--verbosity', '3', seg_file],
+                                  capture_output=True, text=True)
+            dump.write(result.stdout)
+        
+        offset += seg_size
+    
+    print(f"\nTotal file size: {offset} bytes (0x{offset:x})")
+    print(f"✓ Dump saved to: {dump_file}")
+    
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Concatenate and dump DASH fMP4 representations using mp4dump',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                          # Process all fMP4 reps in current directory
+  %(prog)s -d /path/to/dash         # Process all fMP4 reps in specified directory
+  %(prog)s -r 1                     # Process only representation ID "1"
+  %(prog)s -r 1 2 3                 # Process representations 1, 2, and 3
+  %(prog)s -d /path/to/dash -r 2    # Process rep 2 in specified directory
+        '''
+    )
+    
+    parser.add_argument('-d', '--directory', 
+                       default='.',
+                       help='Directory containing DASH manifest (default: current directory)')
+    parser.add_argument('-r', '--reps', 
+                       nargs='+',
+                       metavar='REP_ID',
+                       help='Specific representation ID(s) to process (default: all fMP4 reps)')
+    
+    args = parser.parse_args()
+    
+    directory = os.path.abspath(args.directory)
+    
+    # Verify directory exists
+    if not os.path.isdir(directory):
+        print(f"Error: Directory not found: {directory}")
+        sys.exit(1)
+    
+    # Find MPD file
+    mpd_file = find_mpd_file(directory)
+    if not mpd_file:
+        print(f"Error: No MPD manifest file found in: {directory}")
+        sys.exit(1)
+    
+    print(f"Found manifest: {mpd_file}")
+    print(f"Working directory: {directory}")
+    
+    # Parse representations
+    try:
+        representations = get_representation_info(mpd_file, args.reps)
+    except Exception as e:
+        print(f"Error parsing MPD file: {e}")
+        sys.exit(1)
+    
+    if not representations:
+        if args.reps:
+            print(f"Error: No representations found with ID(s): {', '.join(args.reps)}")
+        else:
+            print(f"Error: No fMP4 representations found in manifest")
+        sys.exit(1)
+    
+    print(f"\nFound {len(representations)} representation(s) to process:")
+    for rep in representations:
+        print(f"  - ID: {rep['id']} ({rep['mime_type']})")
+    
+    # Process each representation
+    success_count = 0
+    fail_count = 0
+    
+    for rep in representations:
+        try:
+            if concat_and_dump_representation(directory, rep):
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            print(f"Error processing representation {rep['id']}: {e}")
+            fail_count += 1
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"Processing complete!")
+    print(f"Success: {success_count} representation(s)")
+    print(f"Failed: {fail_count} representation(s)")
+    print(f"{'='*60}")
+    
+    sys.exit(0 if fail_count == 0 else 1)
+
+if __name__ == "__main__":
+    main()
