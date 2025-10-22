@@ -21,7 +21,7 @@ def thread_safe_print(*args, **kwargs):
     with print_lock:
         print(*args, **kwargs)
 
-def replace_dash_template(template, rep_id, number=None):
+def replace_dash_template(template, rep_id, number=None, time=None):
     """Replace DASH template variables with actual values."""
     result = template.replace('$RepresentationID$', rep_id)
     
@@ -39,6 +39,10 @@ def replace_dash_template(template, rep_id, number=None):
                 return str(number)
         
         result = re.sub(number_pattern, number_replacer, result)
+    
+    if time is not None:
+        # Handle $Time$ template variable
+        result = result.replace('$Time$', str(time))
     
     return result
 
@@ -85,7 +89,9 @@ def get_remote_file_size(url):
 
 def download_file(url, filepath, force_download=False, silent=False):
     """Download a file from URL to filepath, creating directories as needed."""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    dirname = os.path.dirname(filepath)
+    if dirname:  # Only create directory if path has a directory component
+        os.makedirs(dirname, exist_ok=True)
     
     # Check if file already exists and is complete
     if not force_download and os.path.exists(filepath):
@@ -114,8 +120,19 @@ def download_file(url, filepath, force_download=False, silent=False):
         thread_safe_print(f"Error downloading {url}: {e}")
         return False
 
-def download_representation_segments(mpd_url, base_url, rep_id, media_template, init_template, start_number, num_segments):
-    """Download all segments for a single representation sequentially."""
+def download_representation_segments(mpd_url, base_url, rep_id, media_template, init_template, start_number=None, num_segments=None, segment_times=None):
+    """Download all segments for a single representation sequentially.
+    
+    Args:
+        mpd_url: Base MPD URL
+        base_url: BaseURL from MPD
+        rep_id: Representation ID
+        media_template: Media segment template (may contain $Number$ or $Time$)
+        init_template: Initialization segment template
+        start_number: Starting segment number (for $Number$ templates)
+        num_segments: Number of segments to download (for $Number$ templates)
+        segment_times: List of time values (for $Time$ templates)
+    """
     downloaded_count = 0
     failed_count = 0
     
@@ -130,48 +147,61 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
     
     # Download media segments with resume logic
     if media_template:
-        # Find the range of segments to download
-        start_segment = start_number
-        end_segment = start_number + num_segments
-        
-        # Check for existing segments and find resume point
-        last_existing_segment = None
-        for segment_num in range(start_segment, end_segment):
-            media_url_path = replace_dash_template(media_template, rep_id, segment_num)
-            if os.path.exists(media_url_path):
-                last_existing_segment = segment_num
-            else:
-                break
-        
-        # If we found existing segments, verify the last one
-        if last_existing_segment is not None:
-            # Check if the last existing segment is complete
-            last_media_url_path = replace_dash_template(media_template, rep_id, last_existing_segment)
-            last_media_url = urllib.parse.urljoin(mpd_url, base_url + last_media_url_path)
+        if segment_times is not None:
+            # Time-based segments (SegmentTimeline)
+            for idx, segment_time in enumerate(segment_times):
+                media_url_path = replace_dash_template(media_template, rep_id, time=segment_time)
+                media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
+                
+                if download_file(media_url, media_url_path):
+                    downloaded_count += 1
+                else:
+                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
+                    failed_count += 1
+        else:
+            # Number-based segments (SegmentTemplate with duration)
+            # Find the range of segments to download
+            start_segment = start_number
+            end_segment = start_number + num_segments
             
-            thread_safe_print(f"[Rep {rep_id}] Found existing segments up to #{last_existing_segment}")
-            thread_safe_print(f"[Rep {rep_id}] Verifying last segment: {last_media_url_path}")
+            # Check for existing segments and find resume point
+            last_existing_segment = None
+            for segment_num in range(start_segment, end_segment):
+                media_url_path = replace_dash_template(media_template, rep_id, number=segment_num)
+                if os.path.exists(media_url_path):
+                    last_existing_segment = segment_num
+                else:
+                    break
             
-            # Force re-download of the last segment to verify it's complete
-            if not download_file(last_media_url, last_media_url_path, force_download=True):
-                thread_safe_print(f"[Rep {rep_id}] Failed to verify/download last segment: {last_media_url_path}")
-                failed_count += 1
-            else:
-                downloaded_count += 1
+            # If we found existing segments, verify the last one
+            if last_existing_segment is not None:
+                # Check if the last existing segment is complete
+                last_media_url_path = replace_dash_template(media_template, rep_id, number=last_existing_segment)
+                last_media_url = urllib.parse.urljoin(mpd_url, base_url + last_media_url_path)
+                
+                thread_safe_print(f"[Rep {rep_id}] Found existing segments up to #{last_existing_segment}")
+                thread_safe_print(f"[Rep {rep_id}] Verifying last segment: {last_media_url_path}")
+                
+                # Force re-download of the last segment to verify it's complete
+                if not download_file(last_media_url, last_media_url_path, force_download=True):
+                    thread_safe_print(f"[Rep {rep_id}] Failed to verify/download last segment: {last_media_url_path}")
+                    failed_count += 1
+                else:
+                    downloaded_count += 1
+                
+                # Start downloading from the next segment
+                start_segment = last_existing_segment + 1
             
-            # Start downloading from the next segment
-            start_segment = last_existing_segment + 1
-        
-        # Download remaining segments
-        for segment_num in range(start_segment, end_segment):
-            media_url_path = replace_dash_template(media_template, rep_id, segment_num)
-            media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
-            
-            if download_file(media_url, media_url_path):
-                downloaded_count += 1
-            else:
-                thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
-                failed_count += 1
+            # Download remaining segments
+            for segment_num in range(start_segment, end_segment):
+                media_url_path = replace_dash_template(media_template, rep_id, number=segment_num)
+                media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
+                
+                if download_file(media_url, media_url_path):
+                    downloaded_count += 1
+                else:
+                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
+                    failed_count += 1
                 # Continue with next segment instead of stopping
     
     thread_safe_print(f"[Rep {rep_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
@@ -205,37 +235,80 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
         if segment_template is None:
             continue
             
-        duration = int(segment_template.get('duration', 0))
         timescale = int(segment_template.get('timescale', 1))
         start_number = int(segment_template.get('startNumber', 1))
         media_template = segment_template.get('media', '')
         init_template = segment_template.get('initialization', '')
         
-        # Calculate segment duration in seconds
-        segment_duration = duration / timescale
+        # Check if this uses SegmentTimeline
+        segment_timeline = segment_template.find('.//mpd:SegmentTimeline', ns)
         
-        # Calculate total number of segments
-        if segment_duration > 0:
-            num_segments = int(total_duration / segment_duration) + 1
-        else:
-            num_segments = 1
-        
-        # Find all representations in this adaptation set
-        representations = adaptation_set.findall('.//mpd:Representation', ns)
-        
-        for representation in representations:
-            rep_id = representation.get('id')
+        if segment_timeline is not None:
+            # Parse SegmentTimeline to get time values
+            segment_times = []
+            current_time = 0
             
-            # Add download task for this representation
-            download_tasks.append({
-                'mpd_url': mpd_url,
-                'base_url': base_url,
-                'rep_id': rep_id,
-                'media_template': media_template,
-                'init_template': init_template,
-                'start_number': start_number,
-                'num_segments': num_segments
-            })
+            for s_elem in segment_timeline.findall('mpd:S', ns):
+                # t attribute is the start time (optional, defaults to accumulated time)
+                t = s_elem.get('t')
+                if t is not None:
+                    current_time = int(t)
+                
+                # d attribute is the duration
+                d = int(s_elem.get('d', 0))
+                
+                # r attribute is the repeat count (optional)
+                r = int(s_elem.get('r', 0))
+                
+                # Add segments
+                for _ in range(r + 1):
+                    segment_times.append(current_time)
+                    current_time += d
+            
+            # Find all representations in this adaptation set
+            representations = adaptation_set.findall('.//mpd:Representation', ns)
+            
+            for representation in representations:
+                rep_id = representation.get('id')
+                
+                # Add download task for this representation (time-based)
+                download_tasks.append({
+                    'mpd_url': mpd_url,
+                    'base_url': base_url,
+                    'rep_id': rep_id,
+                    'media_template': media_template,
+                    'init_template': init_template,
+                    'segment_times': segment_times
+                })
+        else:
+            # Duration-based segments (original logic)
+            duration = int(segment_template.get('duration', 0))
+            
+            # Calculate segment duration in seconds
+            segment_duration = duration / timescale
+            
+            # Calculate total number of segments
+            if segment_duration > 0:
+                num_segments = int(total_duration / segment_duration) + 1
+            else:
+                num_segments = 1
+            
+            # Find all representations in this adaptation set
+            representations = adaptation_set.findall('.//mpd:Representation', ns)
+            
+            for representation in representations:
+                rep_id = representation.get('id')
+                
+                # Add download task for this representation (number-based)
+                download_tasks.append({
+                    'mpd_url': mpd_url,
+                    'base_url': base_url,
+                    'rep_id': rep_id,
+                    'media_template': media_template,
+                    'init_template': init_template,
+                    'start_number': start_number,
+                    'num_segments': num_segments
+                })
     
     # Execute downloads in parallel (one thread per representation)
     total_downloaded = 0
@@ -246,18 +319,33 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
     
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         # Submit all download tasks
-        future_to_task = {
-            executor.submit(
-                download_representation_segments,
-                task['mpd_url'],
-                task['base_url'],
-                task['rep_id'],
-                task['media_template'],
-                task['init_template'],
-                task['start_number'],
-                task['num_segments']
-            ): task for task in download_tasks
-        }
+        future_to_task = {}
+        
+        for task in download_tasks:
+            if 'segment_times' in task:
+                # Time-based segments
+                future = executor.submit(
+                    download_representation_segments,
+                    task['mpd_url'],
+                    task['base_url'],
+                    task['rep_id'],
+                    task['media_template'],
+                    task['init_template'],
+                    segment_times=task['segment_times']
+                )
+            else:
+                # Number-based segments
+                future = executor.submit(
+                    download_representation_segments,
+                    task['mpd_url'],
+                    task['base_url'],
+                    task['rep_id'],
+                    task['media_template'],
+                    task['init_template'],
+                    start_number=task['start_number'],
+                    num_segments=task['num_segments']
+                )
+            future_to_task[future] = task
         
         # Process completed tasks
         for future in as_completed(future_to_task):
@@ -295,9 +383,28 @@ def main():
     max_threads = args.threads
     
     # Extract manifest filename from URL
-    manifest_filename = os.path.basename(urllib.parse.urlparse(dash_url).path)
-    if not manifest_filename:
-        manifest_filename = "manifest.mpd"
+    parsed_url = urllib.parse.urlparse(dash_url)
+    path = parsed_url.path
+    
+    # Handle URLs ending with / or having empty basename
+    if path.endswith('/'):
+        path = path.rstrip('/')
+    
+    manifest_filename = os.path.basename(path)
+    
+    # If just an extension (like .mpd), use parent directory name
+    if manifest_filename.startswith('.'):
+        parent_dir = os.path.basename(os.path.dirname(path))
+        if parent_dir:
+            manifest_filename = parent_dir + manifest_filename
+        else:
+            manifest_filename = 'manifest.mpd'
+    elif not manifest_filename:
+        manifest_filename = 'manifest.mpd'
+    
+    # Ensure it has .mpd extension
+    if not manifest_filename.endswith('.mpd'):
+        manifest_filename += '.mpd'
     
     print(f"Downloading DASH manifest from: {dash_url}")
     print(f"Using {max_threads} parallel download threads")
