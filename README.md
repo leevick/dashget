@@ -1,12 +1,16 @@
 # DashGet
 
-A Python toolkit for working with DASH (Dynamic Adaptive Streaming over HTTP) video content, including downloading segments and analyzing fMP4 representations.
+A Python toolkit for working with DASH (Dynamic Adaptive Streaming over HTTP) and HLS (HTTP Live Streaming) video content, including downloading segments and analyzing fMP4 representations.
 
 ## Tools
 
 ### dashget - DASH Segment Downloader
 
 Downloads DASH video segments from MPD manifests with multi-threaded support and resume capability.
+
+### hlsget - HLS Segment Downloader
+
+Downloads HLS video segments from M3U8 playlists with multi-threaded support for all variants and audio tracks.
 
 ### dashdump - fMP4 Representation Analyzer
 
@@ -20,8 +24,20 @@ Analyzes fMP4 DASH representations using Bento4's mp4dump tool. Generates detail
 - **Multi-threaded Downloads**: Configurable parallel download threads for faster downloads
 - **Resume Support**: Smart resume functionality - skips already downloaded complete segments
 - **File Verification**: Verifies file completeness by comparing local and remote file sizes
-- **Template Support**: Handles DASH URL templates with `$RepresentationID$` and `$Number$` variables
+- **Template Support**: Handles DASH URL templates with `$RepresentationID$`, `$Number$`, and `$Time$` variables
+- **SegmentTimeline Support**: Supports both duration-based and timeline-based segment templates
 - **Duration Parsing**: Supports multiple duration formats including ISO 8601
+- **Thread-safe Output**: Coordinated output from multiple download threads
+
+### hlsget Features
+
+- **HLS Master Playlist Parsing**: Automatically parses M3U8 master playlists
+- **Multi-variant Support**: Downloads all video quality variants automatically
+- **Multi-audio Support**: Downloads all audio tracks (e.g., multiple languages)
+- **Multi-threaded Downloads**: Configurable parallel download threads for faster downloads
+- **File Verification**: Verifies file completeness by comparing local and remote file sizes
+- **Initialization Segment Support**: Handles EXT-X-MAP initialization segments
+- **Playlist Preservation**: Saves all media playlists for offline playback
 - **Thread-safe Output**: Coordinated output from multiple download threads
 
 ### dashdump Features
@@ -63,7 +79,7 @@ brew install bento4
 ### Make Scripts Executable
 
 ```bash
-chmod +x dashget dashdump
+chmod +x dashget hlsget dashdump
 ```
 
 ## Usage
@@ -95,9 +111,42 @@ chmod +x dashget dashdump
 ./dashget https://example.com/video/manifest.mpd --max-threads 16
 ```
 
-#### Command Line Options
+### hlsget - Download HLS Content
+
+#### Basic Usage
+
+```bash
+./hlsget <HLS_MASTER_PLAYLIST_URL>
+```
+
+#### With Custom Thread Count
+
+```bash
+./hlsget <HLS_MASTER_PLAYLIST_URL> --threads 8
+```
+
+#### Examples
+
+```bash
+# Download with default 4 threads
+./hlsget https://example.com/video/master.m3u8
+
+# Download with 8 parallel threads
+./hlsget https://example.com/video/master.m3u8 -t 8
+
+# Download with maximum threads (use with caution)
+./hlsget https://example.com/video/master.m3u8 --max-threads 16
+```
+
+#### Command Line Options (dashget)
 
 - `dash_url`: URL of the DASH manifest (.mpd file) - **required**
+- `-t, --threads`: Maximum number of parallel download threads (default: 4)
+- `--max-threads`: Alias for `--threads`
+
+#### Command Line Options (hlsget)
+
+- `hls_url`: URL of the HLS master playlist (.m3u8 file) - **required**
 - `-t, --threads`: Maximum number of parallel download threads (default: 4)
 - `--max-threads`: Alias for `--threads`
 
@@ -149,7 +198,9 @@ For each processed representation with ID `{rep_id}`, the following files are cr
 ./dashdump -d ~/Downloads/dash_content -r 2
 ```
 
-## Workflow Example
+## Workflow Examples
+
+### DASH Workflow
 
 Complete workflow for downloading and analyzing DASH content:
 
@@ -167,6 +218,22 @@ Complete workflow for downloading and analyzing DASH content:
 less video1.dump
 ```
 
+### HLS Workflow
+
+Complete workflow for downloading HLS content:
+
+```bash
+# 1. Download HLS content (all variants and audio tracks)
+./hlsget https://example.com/video/master.m3u8
+
+# 2. All playlists and segments are now available locally
+# The master playlist is saved as master.m3u8
+# Media playlists are saved with their original names
+# All segments are in the hls/ subdirectory
+
+# 3. You can play the downloaded content offline using any HLS player
+```
+
 ## How It Works
 
 ### dashget Workflow
@@ -175,11 +242,24 @@ less video1.dump
 2. **Parses the manifest** to extract:
    - Base URLs
    - Representation information
-   - Segment templates
+   - Segment templates (SegmentTemplate or SegmentTimeline)
    - Duration and timing information
 3. **Creates download tasks** for each representation's segments
 4. **Downloads segments in parallel** using configurable thread pool
 5. **Verifies completeness** and resumes interrupted downloads
+
+### hlsget Workflow
+
+1. **Downloads the master playlist** from the provided URL
+2. **Parses the master playlist** to extract:
+   - Video variant playlists (different quality levels)
+   - Audio media playlists (different languages)
+3. **Downloads all media playlists** (.m3u8 files)
+4. **Parses each media playlist** to extract:
+   - Initialization segments (EXT-X-MAP)
+   - Media segment URLs
+5. **Downloads all segments in parallel** using configurable thread pool
+6. **Verifies completeness** by comparing file sizes
 
 ### dashdump Workflow
 
@@ -190,6 +270,8 @@ less video1.dump
    - Finds initialization segment and media segments
    - Runs `mp4dump --verbosity 3` on each segment
    - Writes output with file offsets to `.dump` file in the manifest directory
+   - Concatenates all segments to `.m4s` file
+   - Generates hexdump to `.hex` file
 5. **Generates summary** of processed representations
 
 ## Output
@@ -198,9 +280,19 @@ less video1.dump
 
 The tool creates a directory structure matching the DASH manifest organization:
 - Downloads the manifest file (`.mpd`)
-- Creates subdirectories for different representations
+- Creates subdirectories as needed for segments
 - Downloads initialization segments and media segments
 - Provides progress output and download summary
+
+### hlsget Output
+
+The tool creates the following structure:
+- Master playlist (e.g., `master.m3u8`)
+- All media playlists (e.g., `video_eng=1001000.m3u8`, `audio_eng=64008.m3u8`)
+- `hls/` subdirectory containing all segments:
+  - Initialization segments (`.m4s` files from EXT-X-MAP)
+  - Media segments (numbered `.m4s` files)
+- Progress output and download summary
 
 ### dashdump Output
 

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import urllib.request
+import urllib.parse
+from pathlib import Path
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
+
+# Global lock for thread-safe printing
+print_lock = threading.Lock()
+
+def thread_safe_print(*args, **kwargs):
+    """Thread-safe print function."""
+    with print_lock:
+        print(*args, **kwargs)
+
+def get_remote_file_size(url):
+    """Get the size of a remote file using HEAD request."""
+    try:
+        req = urllib.request.Request(url, method='HEAD')
+        with urllib.request.urlopen(req) as response:
+            content_length = response.headers.get('Content-Length')
+            return int(content_length) if content_length else None
+    except Exception:
+        return None
+
+def download_file(url, filepath, force_download=False, silent=False):
+    """Download a file from URL to filepath, creating directories as needed."""
+    dirname = os.path.dirname(filepath)
+    if dirname:  # Only create directory if path has a directory component
+        os.makedirs(dirname, exist_ok=True)
+    
+    # Check if file already exists and is complete
+    if not force_download and os.path.exists(filepath):
+        local_size = os.path.getsize(filepath)
+        remote_size = get_remote_file_size(url)
+        
+        if remote_size is not None and local_size == remote_size:
+            if not silent:
+                thread_safe_print(f"Skipping (already complete): {filepath}")
+            return True
+        elif remote_size is not None:
+            if not silent:
+                thread_safe_print(f"File size mismatch: {filepath} (local: {local_size}, remote: {remote_size})")
+                thread_safe_print(f"Re-downloading: {url} -> {filepath}")
+        else:
+            if not silent:
+                thread_safe_print(f"Cannot verify size, re-downloading: {url} -> {filepath}")
+    else:
+        if not silent:
+            thread_safe_print(f"Downloading: {url} -> {filepath}")
+    
+    try:
+        urllib.request.urlretrieve(url, filepath)
+        return True
+    except Exception as e:
+        thread_safe_print(f"Error downloading {url}: {e}")
+        return False
+
+def parse_media_playlist(playlist_url, playlist_content):
+    """Parse a media playlist and return list of segment URLs."""
+    lines = playlist_content.strip().split('\n')
+    segments = []
+    init_segment = None
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        # Check for initialization segment (EXT-X-MAP)
+        if line.startswith('#EXT-X-MAP:'):
+            # Extract URI from EXT-X-MAP:URI="..."
+            match = re.search(r'URI="([^"]+)"', line)
+            if match:
+                init_segment = match.group(1)
+        
+        # Skip comments and empty lines
+        if line.startswith('#') or not line:
+            continue
+        
+        # This is a segment URL
+        segments.append(line)
+    
+    return init_segment, segments
+
+def download_variant_segments(playlist_url, variant_id, init_segment, segments):
+    """Download all segments for a single variant sequentially."""
+    downloaded_count = 0
+    failed_count = 0
+    
+    # Download initialization segment if exists
+    if init_segment:
+        init_url = urllib.parse.urljoin(playlist_url, init_segment)
+        if download_file(init_url, init_segment):
+            downloaded_count += 1
+        else:
+            failed_count += 1
+    
+    # Download media segments
+    for segment in segments:
+        segment_url = urllib.parse.urljoin(playlist_url, segment)
+        
+        if download_file(segment_url, segment):
+            downloaded_count += 1
+        else:
+            thread_safe_print(f"[Variant {variant_id}] Failed to download segment: {segment}")
+            failed_count += 1
+    
+    thread_safe_print(f"[Variant {variant_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
+    return downloaded_count, failed_count
+
+def parse_master_playlist_and_download(master_url, master_content, max_threads=4):
+    """Parse master playlist and download all variants using parallel processing."""
+    lines = master_content.strip().split('\n')
+    
+    # Collect all media playlists (variants and audio)
+    media_playlists = []
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        # Check for audio media playlists (EXT-X-MEDIA)
+        if line.startswith('#EXT-X-MEDIA:'):
+            # Extract URI from TYPE=AUDIO
+            if 'TYPE=AUDIO' in line:
+                match = re.search(r'URI="([^"]+)"', line)
+                if match:
+                    playlist_uri = match.group(1)
+                    # Extract language and name for identification
+                    lang_match = re.search(r'LANGUAGE="([^"]+)"', line)
+                    name_match = re.search(r'NAME="([^"]+)"', line)
+                    variant_id = f"audio-{lang_match.group(1) if lang_match else 'unknown'}"
+                    media_playlists.append({
+                        'uri': playlist_uri,
+                        'id': variant_id,
+                        'type': 'audio'
+                    })
+        
+        # Check for video variant playlists (EXT-X-STREAM-INF)
+        elif line.startswith('#EXT-X-STREAM-INF:'):
+            # The next non-comment line is the playlist URI
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if not next_line.startswith('#'):
+                    # Extract resolution or bandwidth for identification
+                    res_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
+                    bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                    if res_match:
+                        variant_id = f"video-{res_match.group(1)}"
+                    elif bw_match:
+                        variant_id = f"video-{bw_match.group(1)}bps"
+                    else:
+                        variant_id = f"video-{len(media_playlists)}"
+                    
+                    media_playlists.append({
+                        'uri': next_line,
+                        'id': variant_id,
+                        'type': 'video'
+                    })
+    
+    thread_safe_print(f"Found {len(media_playlists)} media playlists to download")
+    
+    # Download and parse each media playlist
+    download_tasks = []
+    
+    for playlist in media_playlists:
+        playlist_url = urllib.parse.urljoin(master_url, playlist['uri'])
+        thread_safe_print(f"Fetching media playlist: {playlist['id']} from {playlist_url}")
+        
+        try:
+            with urllib.request.urlopen(playlist_url) as response:
+                playlist_content = response.read().decode('utf-8')
+            
+            # Save the media playlist
+            playlist_filename = playlist['uri']
+            with open(playlist_filename, 'w') as f:
+                f.write(playlist_content)
+            thread_safe_print(f"Saved media playlist: {playlist_filename}")
+            
+            # Parse segments
+            init_segment, segments = parse_media_playlist(playlist_url, playlist_content)
+            
+            if segments:
+                download_tasks.append({
+                    'playlist_url': playlist_url,
+                    'variant_id': playlist['id'],
+                    'init_segment': init_segment,
+                    'segments': segments
+                })
+                thread_safe_print(f"[{playlist['id']}] Found {len(segments)} segments" + 
+                                (f" (+ 1 init segment)" if init_segment else ""))
+            else:
+                thread_safe_print(f"Warning: No segments found in {playlist['id']}")
+                
+        except Exception as e:
+            thread_safe_print(f"Error fetching media playlist {playlist['id']}: {e}")
+    
+    # Execute downloads in parallel
+    total_downloaded = 0
+    total_failed = 0
+    
+    thread_safe_print(f"\nStarting parallel downloads with {min(max_threads, len(download_tasks))} threads...")
+    thread_safe_print(f"Total variants to download: {len(download_tasks)}")
+    
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        # Submit all download tasks
+        future_to_task = {
+            executor.submit(
+                download_variant_segments,
+                task['playlist_url'],
+                task['variant_id'],
+                task['init_segment'],
+                task['segments']
+            ): task for task in download_tasks
+        }
+        
+        # Process completed tasks
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            try:
+                downloaded, failed = future.result()
+                total_downloaded += downloaded
+                total_failed += failed
+            except Exception as e:
+                thread_safe_print(f"[Variant {task['variant_id']}] Exception occurred: {e}")
+                total_failed += 1
+    
+    thread_safe_print(f"\nDownload summary:")
+    thread_safe_print(f"Total files downloaded: {total_downloaded}")
+    thread_safe_print(f"Total files failed: {total_failed}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Download HLS video segments')
+    parser.add_argument('hls_url', help='URL of the HLS master playlist (.m3u8 file)')
+    parser.add_argument('-t', '--threads', type=int, default=4, 
+                       help='Maximum number of parallel download threads (default: 4)')
+    parser.add_argument('--max-threads', type=int, dest='threads',
+                       help='Alias for --threads')
+    
+    args = parser.parse_args()
+    
+    # Validate thread count
+    if args.threads < 1:
+        print("Error: Thread count must be at least 1")
+        sys.exit(1)
+    if args.threads > 16:
+        print("Warning: Using more than 16 threads may put excessive load on the server")
+    
+    hls_url = args.hls_url
+    max_threads = args.threads
+    
+    # Extract manifest filename from URL
+    parsed_url = urllib.parse.urlparse(hls_url)
+    path = parsed_url.path
+    
+    # Handle URLs ending with / or having empty basename
+    if path.endswith('/'):
+        path = path.rstrip('/')
+    
+    manifest_filename = os.path.basename(path)
+    
+    # If just an extension (like .m3u8), use parent directory name
+    if manifest_filename.startswith('.'):
+        parent_dir = os.path.basename(os.path.dirname(path))
+        if parent_dir:
+            manifest_filename = parent_dir + manifest_filename
+        else:
+            manifest_filename = 'master.m3u8'
+    elif not manifest_filename:
+        manifest_filename = 'master.m3u8'
+    
+    # Ensure it has .m3u8 extension
+    if not manifest_filename.endswith('.m3u8'):
+        manifest_filename += '.m3u8'
+    
+    print(f"Downloading HLS master playlist from: {hls_url}")
+    print(f"Using {max_threads} parallel download threads")
+    
+    try:
+        # Download the master playlist
+        with urllib.request.urlopen(hls_url) as response:
+            master_content = response.read().decode('utf-8')
+        
+        # Save master playlist to current directory
+        with open(manifest_filename, 'w') as f:
+            f.write(master_content)
+        print(f"Master playlist saved as: {manifest_filename}")
+        
+        # Parse and download all variants and segments
+        parse_master_playlist_and_download(hls_url, master_content, max_threads)
+        
+        print("Download complete!")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
