@@ -136,11 +136,22 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
     downloaded_count = 0
     failed_count = 0
     
+    # Determine local directory for segments based on BaseURL
+    # If BaseURL is not './' or empty, use it as a subdirectory
+    local_dir = ''
+    if base_url and base_url != './' and base_url != '.':
+        local_dir = base_url.rstrip('/')
+        # Create the directory if it doesn't exist
+        if local_dir:
+            os.makedirs(local_dir, exist_ok=True)
+    
     # Download initialization segment if exists
     if init_template:
         init_url_path = replace_dash_template(init_template, rep_id)
         init_url = urllib.parse.urljoin(mpd_url, base_url + init_url_path)
-        if download_file(init_url, init_url_path):
+        # Save to local directory
+        local_init_path = os.path.join(local_dir, init_url_path) if local_dir else init_url_path
+        if download_file(init_url, local_init_path):
             downloaded_count += 1
         else:
             failed_count += 1
@@ -152,11 +163,13 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
             for idx, segment_time in enumerate(segment_times):
                 media_url_path = replace_dash_template(media_template, rep_id, time=segment_time)
                 media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
+                # Save to local directory
+                local_media_path = os.path.join(local_dir, media_url_path) if local_dir else media_url_path
                 
-                if download_file(media_url, media_url_path):
+                if download_file(media_url, local_media_path):
                     downloaded_count += 1
                 else:
-                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
+                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {local_media_path}")
                     failed_count += 1
         else:
             # Number-based segments (SegmentTemplate with duration)
@@ -168,7 +181,8 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
             last_existing_segment = None
             for segment_num in range(start_segment, end_segment):
                 media_url_path = replace_dash_template(media_template, rep_id, number=segment_num)
-                if os.path.exists(media_url_path):
+                local_media_path = os.path.join(local_dir, media_url_path) if local_dir else media_url_path
+                if os.path.exists(local_media_path):
                     last_existing_segment = segment_num
                 else:
                     break
@@ -178,13 +192,14 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
                 # Check if the last existing segment is complete
                 last_media_url_path = replace_dash_template(media_template, rep_id, number=last_existing_segment)
                 last_media_url = urllib.parse.urljoin(mpd_url, base_url + last_media_url_path)
+                local_last_media_path = os.path.join(local_dir, last_media_url_path) if local_dir else last_media_url_path
                 
                 thread_safe_print(f"[Rep {rep_id}] Found existing segments up to #{last_existing_segment}")
-                thread_safe_print(f"[Rep {rep_id}] Verifying last segment: {last_media_url_path}")
+                thread_safe_print(f"[Rep {rep_id}] Verifying last segment: {local_last_media_path}")
                 
                 # Force re-download of the last segment to verify it's complete
-                if not download_file(last_media_url, last_media_url_path, force_download=True):
-                    thread_safe_print(f"[Rep {rep_id}] Failed to verify/download last segment: {last_media_url_path}")
+                if not download_file(last_media_url, local_last_media_path, force_download=True):
+                    thread_safe_print(f"[Rep {rep_id}] Failed to verify/download last segment: {local_last_media_path}")
                     failed_count += 1
                 else:
                     downloaded_count += 1
@@ -196,11 +211,12 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
             for segment_num in range(start_segment, end_segment):
                 media_url_path = replace_dash_template(media_template, rep_id, number=segment_num)
                 media_url = urllib.parse.urljoin(mpd_url, base_url + media_url_path)
+                local_media_path = os.path.join(local_dir, media_url_path) if local_dir else media_url_path
                 
-                if download_file(media_url, media_url_path):
+                if download_file(media_url, local_media_path):
                     downloaded_count += 1
                 else:
-                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {media_url_path}")
+                    thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {local_media_path}")
                     failed_count += 1
                 # Continue with next segment instead of stopping
     
