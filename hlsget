@@ -94,6 +94,7 @@ def download_variant_segments(playlist_url, variant_id, init_segment, segments):
     # Download initialization segment if exists
     if init_segment:
         init_url = urllib.parse.urljoin(playlist_url, init_segment)
+        # Use the relative path from the playlist, not the full URL path
         if download_file(init_url, init_segment):
             downloaded_count += 1
         else:
@@ -102,7 +103,7 @@ def download_variant_segments(playlist_url, variant_id, init_segment, segments):
     # Download media segments
     for segment in segments:
         segment_url = urllib.parse.urljoin(playlist_url, segment)
-        
+        # Use the relative path from the playlist, not the full URL path
         if download_file(segment_url, segment):
             downloaded_count += 1
         else:
@@ -178,8 +179,16 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
             with urllib.request.urlopen(playlist_url) as response:
                 playlist_content = response.read().decode('utf-8')
             
-            # Save the media playlist
+            # Use the relative URI from the master playlist as the local filename
+            # This preserves the directory structure relative to the master playlist
             playlist_filename = playlist['uri']
+
+            # Ensure parent directory exists before writing
+            playlist_dir = os.path.dirname(playlist_filename)
+            if playlist_dir:
+                os.makedirs(playlist_dir, exist_ok=True)
+
+            # Save the media playlist
             with open(playlist_filename, 'w') as f:
                 f.write(playlist_content)
             thread_safe_print(f"Saved media playlist: {playlist_filename}")
