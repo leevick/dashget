@@ -223,6 +223,48 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
     thread_safe_print(f"[Rep {rep_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
     return downloaded_count, failed_count
 
+def download_segmentlist_representation(mpd_url, base_url, rep_id, segment_list):
+    """Download all segments for a representation using SegmentList.
+    
+    Args:
+        mpd_url: Base MPD URL
+        base_url: BaseURL from MPD
+        rep_id: Representation ID
+        segment_list: Dict containing 'init_url' and 'segment_urls' list
+    """
+    downloaded_count = 0
+    failed_count = 0
+    
+    # Determine local directory for segments based on BaseURL
+    local_dir = ''
+    if base_url and base_url != './' and base_url != '.':
+        local_dir = base_url.rstrip('/')
+        if local_dir:
+            os.makedirs(local_dir, exist_ok=True)
+    
+    # Download initialization segment if exists
+    if segment_list.get('init_url'):
+        init_url = urllib.parse.urljoin(mpd_url, base_url + segment_list['init_url'])
+        local_init_path = os.path.join(local_dir, segment_list['init_url']) if local_dir else segment_list['init_url']
+        if download_file(init_url, local_init_path):
+            downloaded_count += 1
+        else:
+            failed_count += 1
+    
+    # Download media segments
+    for segment_url in segment_list.get('segment_urls', []):
+        media_url = urllib.parse.urljoin(mpd_url, base_url + segment_url)
+        local_media_path = os.path.join(local_dir, segment_url) if local_dir else segment_url
+        
+        if download_file(media_url, local_media_path):
+            downloaded_count += 1
+        else:
+            thread_safe_print(f"[Rep {rep_id}] Failed to download segment: {local_media_path}")
+            failed_count += 1
+    
+    thread_safe_print(f"[Rep {rep_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
+    return downloaded_count, failed_count
+
 def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
     """Parse MPD content and download all segments using parallel processing."""
     # Parse the XML
@@ -246,85 +288,120 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
     download_tasks = []
     
     for adaptation_set in adaptation_sets:
-        # Get segment template
+        # Check for SegmentTemplate first
         segment_template = adaptation_set.find('.//mpd:SegmentTemplate', ns)
-        if segment_template is None:
-            continue
-            
-        timescale = int(segment_template.get('timescale', 1))
-        start_number = int(segment_template.get('startNumber', 1))
-        media_template = segment_template.get('media', '')
-        init_template = segment_template.get('initialization', '')
         
-        # Check if this uses SegmentTimeline
-        segment_timeline = segment_template.find('.//mpd:SegmentTimeline', ns)
-        
-        if segment_timeline is not None:
-            # Parse SegmentTimeline to get time values
-            segment_times = []
-            current_time = 0
+        if segment_template is not None:
+            # Handle SegmentTemplate (existing logic)
+            timescale = int(segment_template.get('timescale', 1))
+            start_number = int(segment_template.get('startNumber', 1))
+            media_template = segment_template.get('media', '')
+            init_template = segment_template.get('initialization', '')
             
-            for s_elem in segment_timeline.findall('mpd:S', ns):
-                # t attribute is the start time (optional, defaults to accumulated time)
-                t = s_elem.get('t')
-                if t is not None:
-                    current_time = int(t)
+            # Check if this uses SegmentTimeline
+            segment_timeline = segment_template.find('.//mpd:SegmentTimeline', ns)
+            
+            if segment_timeline is not None:
+                # Parse SegmentTimeline to get time values
+                segment_times = []
+                current_time = 0
                 
-                # d attribute is the duration
-                d = int(s_elem.get('d', 0))
+                for s_elem in segment_timeline.findall('mpd:S', ns):
+                    # t attribute is the start time (optional, defaults to accumulated time)
+                    t = s_elem.get('t')
+                    if t is not None:
+                        current_time = int(t)
+                    
+                    # d attribute is the duration
+                    d = int(s_elem.get('d', 0))
+                    
+                    # r attribute is the repeat count (optional)
+                    r = int(s_elem.get('r', 0))
+                    
+                    # Add segments
+                    for _ in range(r + 1):
+                        segment_times.append(current_time)
+                        current_time += d
                 
-                # r attribute is the repeat count (optional)
-                r = int(s_elem.get('r', 0))
+                # Find all representations in this adaptation set
+                representations = adaptation_set.findall('.//mpd:Representation', ns)
                 
-                # Add segments
-                for _ in range(r + 1):
-                    segment_times.append(current_time)
-                    current_time += d
-            
-            # Find all representations in this adaptation set
-            representations = adaptation_set.findall('.//mpd:Representation', ns)
-            
-            for representation in representations:
-                rep_id = representation.get('id')
-                
-                # Add download task for this representation (time-based)
-                download_tasks.append({
-                    'mpd_url': mpd_url,
-                    'base_url': base_url,
-                    'rep_id': rep_id,
-                    'media_template': media_template,
-                    'init_template': init_template,
-                    'segment_times': segment_times
-                })
-        else:
-            # Duration-based segments (original logic)
-            duration = int(segment_template.get('duration', 0))
-            
-            # Calculate segment duration in seconds
-            segment_duration = duration / timescale
-            
-            # Calculate total number of segments
-            if segment_duration > 0:
-                num_segments = int(total_duration / segment_duration) + 1
+                for representation in representations:
+                    rep_id = representation.get('id')
+                    
+                    # Add download task for this representation (time-based)
+                    download_tasks.append({
+                        'mpd_url': mpd_url,
+                        'base_url': base_url,
+                        'rep_id': rep_id,
+                        'media_template': media_template,
+                        'init_template': init_template,
+                        'segment_times': segment_times
+                    })
             else:
-                num_segments = 1
-            
-            # Find all representations in this adaptation set
+                # Duration-based segments (original logic)
+                duration = int(segment_template.get('duration', 0))
+                
+                # Calculate segment duration in seconds
+                segment_duration = duration / timescale
+                
+                # Calculate total number of segments
+                if segment_duration > 0:
+                    num_segments = int(total_duration / segment_duration) + 1
+                else:
+                    num_segments = 1
+                
+                # Find all representations in this adaptation set
+                representations = adaptation_set.findall('.//mpd:Representation', ns)
+                
+                for representation in representations:
+                    rep_id = representation.get('id')
+                    
+                    # Add download task for this representation (number-based)
+                    download_tasks.append({
+                        'mpd_url': mpd_url,
+                        'base_url': base_url,
+                        'rep_id': rep_id,
+                        'media_template': media_template,
+                        'init_template': init_template,
+                        'start_number': start_number,
+                        'num_segments': num_segments
+                    })
+        else:
+            # Check for SegmentList (alternative to SegmentTemplate)
+            # SegmentList can be at adaptation set or representation level
             representations = adaptation_set.findall('.//mpd:Representation', ns)
             
             for representation in representations:
                 rep_id = representation.get('id')
                 
-                # Add download task for this representation (number-based)
-                download_tasks.append({
-                    'mpd_url': mpd_url,
-                    'base_url': base_url,
-                    'rep_id': rep_id,
-                    'media_template': media_template,
-                    'init_template': init_template,
-                    'start_number': start_number,
-                    'num_segments': num_segments
-                })
+                # Look for SegmentList in representation first, then adaptation set
+                segment_list_elem = representation.find('.//mpd:SegmentList', ns)
+                if segment_list_elem is None:
+                    segment_list_elem = adaptation_set.find('.//mpd:SegmentList', ns)
+                
+                if segment_list_elem is not None:
+                    # Parse initialization URL
+                    init_elem = segment_list_elem.find('mpd:Initialization', ns)
+                    init_url = init_elem.get('sourceURL') if init_elem is not None else None
+                    
+                    # Parse all segment URLs
+                    segment_urls = []
+                    for segment_url_elem in segment_list_elem.findall('mpd:SegmentURL', ns):
+                        media_url = segment_url_elem.get('media')
+                        if media_url:
+                            segment_urls.append(media_url)
+                    
+                    # Add download task for this representation (SegmentList)
+                    download_tasks.append({
+                        'mpd_url': mpd_url,
+                        'base_url': base_url,
+                        'rep_id': rep_id,
+                        'segment_list': {
+                            'init_url': init_url,
+                            'segment_urls': segment_urls
+                        }
+                    })
     
     # Execute downloads in parallel (one thread per representation)
     total_downloaded = 0
@@ -338,8 +415,17 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
         future_to_task = {}
         
         for task in download_tasks:
-            if 'segment_times' in task:
-                # Time-based segments
+            if 'segment_list' in task:
+                # SegmentList-based segments
+                future = executor.submit(
+                    download_segmentlist_representation,
+                    task['mpd_url'],
+                    task['base_url'],
+                    task['rep_id'],
+                    task['segment_list']
+                )
+            elif 'segment_times' in task:
+                # Time-based segments (SegmentTemplate with SegmentTimeline)
                 future = executor.submit(
                     download_representation_segments,
                     task['mpd_url'],
@@ -350,7 +436,7 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
                     segment_times=task['segment_times']
                 )
             else:
-                # Number-based segments
+                # Number-based segments (SegmentTemplate with duration)
                 future = executor.submit(
                     download_representation_segments,
                     task['mpd_url'],
