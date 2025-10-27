@@ -91,11 +91,19 @@ def download_variant_segments(playlist_url, variant_id, init_segment, segments):
     downloaded_count = 0
     failed_count = 0
     
+    # Extract the directory path from the playlist URL to prepend to segments
+    # e.g., https://.../a1/prog_index.m3u8 -> a1/
+    parsed_playlist_url = urllib.parse.urlparse(playlist_url)
+    playlist_dir = os.path.dirname(parsed_playlist_url.path).lstrip('/')
+    if playlist_dir:
+        playlist_dir += '/'
+    
     # Download initialization segment if exists
     if init_segment:
         init_url = urllib.parse.urljoin(playlist_url, init_segment)
-        # Use the relative path from the playlist, not the full URL path
-        if download_file(init_url, init_segment):
+        # Prepend the playlist directory to create the relative path
+        init_path = playlist_dir + init_segment
+        if download_file(init_url, init_path):
             downloaded_count += 1
         else:
             failed_count += 1
@@ -103,8 +111,9 @@ def download_variant_segments(playlist_url, variant_id, init_segment, segments):
     # Download media segments
     for segment in segments:
         segment_url = urllib.parse.urljoin(playlist_url, segment)
-        # Use the relative path from the playlist, not the full URL path
-        if download_file(segment_url, segment):
+        # Prepend the playlist directory to create the relative path
+        segment_path = playlist_dir + segment
+        if download_file(segment_url, segment_path):
             downloaded_count += 1
         else:
             thread_safe_print(f"[Variant {variant_id}] Failed to download segment: {segment}")
