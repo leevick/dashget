@@ -137,13 +137,15 @@ def download_representation_segments(mpd_url, base_url, rep_id, media_template, 
     failed_count = 0
     
     # Determine local directory for segments based on BaseURL
-    # If BaseURL is not './' or empty, use it as a subdirectory
+    # If BaseURL is not './' or empty, and it's a relative path (not absolute URL), use it as a subdirectory
     local_dir = ''
     if base_url and base_url != './' and base_url != '.':
-        local_dir = base_url.rstrip('/')
-        # Create the directory if it doesn't exist
-        if local_dir:
-            os.makedirs(local_dir, exist_ok=True)
+        # Check if base_url is an absolute URL (starts with http:// or https://)
+        if not base_url.startswith('http://') and not base_url.startswith('https://'):
+            local_dir = base_url.rstrip('/')
+            # Create the directory if it doesn't exist
+            if local_dir:
+                os.makedirs(local_dir, exist_ok=True)
     
     # Download initialization segment if exists
     if init_template:
@@ -238,9 +240,11 @@ def download_segmentlist_representation(mpd_url, base_url, rep_id, segment_list)
     # Determine local directory for segments based on BaseURL
     local_dir = ''
     if base_url and base_url != './' and base_url != '.':
-        local_dir = base_url.rstrip('/')
-        if local_dir:
-            os.makedirs(local_dir, exist_ok=True)
+        # Check if base_url is an absolute URL (starts with http:// or https://)
+        if not base_url.startswith('http://') and not base_url.startswith('https://'):
+            local_dir = base_url.rstrip('/')
+            if local_dir:
+                os.makedirs(local_dir, exist_ok=True)
     
     # Download initialization segment if exists
     if segment_list.get('init_url'):
@@ -302,42 +306,69 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
             segment_timeline = segment_template.find('.//mpd:SegmentTimeline', ns)
             
             if segment_timeline is not None:
-                # Parse SegmentTimeline to get time values
-                segment_times = []
-                current_time = 0
+                # SegmentTimeline exists - check if template uses $Time$ or $Number$
+                uses_time_template = '$Time$' in media_template
                 
-                for s_elem in segment_timeline.findall('mpd:S', ns):
-                    # t attribute is the start time (optional, defaults to accumulated time)
-                    t = s_elem.get('t')
-                    if t is not None:
-                        current_time = int(t)
+                if uses_time_template:
+                    # Parse SegmentTimeline to get time values for $Time$ template
+                    segment_times = []
+                    current_time = 0
                     
-                    # d attribute is the duration
-                    d = int(s_elem.get('d', 0))
+                    for s_elem in segment_timeline.findall('mpd:S', ns):
+                        # t attribute is the start time (optional, defaults to accumulated time)
+                        t = s_elem.get('t')
+                        if t is not None:
+                            current_time = int(t)
+                        
+                        # d attribute is the duration
+                        d = int(s_elem.get('d', 0))
+                        
+                        # r attribute is the repeat count (optional)
+                        r = int(s_elem.get('r', 0))
+                        
+                        # Add segments
+                        for _ in range(r + 1):
+                            segment_times.append(current_time)
+                            current_time += d
                     
-                    # r attribute is the repeat count (optional)
-                    r = int(s_elem.get('r', 0))
+                    # Find all representations in this adaptation set
+                    representations = adaptation_set.findall('.//mpd:Representation', ns)
                     
-                    # Add segments
-                    for _ in range(r + 1):
-                        segment_times.append(current_time)
-                        current_time += d
-                
-                # Find all representations in this adaptation set
-                representations = adaptation_set.findall('.//mpd:Representation', ns)
-                
-                for representation in representations:
-                    rep_id = representation.get('id')
+                    for representation in representations:
+                        rep_id = representation.get('id')
+                        
+                        # Add download task for this representation (time-based)
+                        download_tasks.append({
+                            'mpd_url': mpd_url,
+                            'base_url': base_url,
+                            'rep_id': rep_id,
+                            'media_template': media_template,
+                            'init_template': init_template,
+                            'segment_times': segment_times
+                        })
+                else:
+                    # SegmentTimeline with $Number$ template - count segments
+                    num_segments = 0
+                    for s_elem in segment_timeline.findall('mpd:S', ns):
+                        r = int(s_elem.get('r', 0))
+                        num_segments += r + 1
                     
-                    # Add download task for this representation (time-based)
-                    download_tasks.append({
-                        'mpd_url': mpd_url,
-                        'base_url': base_url,
-                        'rep_id': rep_id,
-                        'media_template': media_template,
-                        'init_template': init_template,
-                        'segment_times': segment_times
-                    })
+                    # Find all representations in this adaptation set
+                    representations = adaptation_set.findall('.//mpd:Representation', ns)
+                    
+                    for representation in representations:
+                        rep_id = representation.get('id')
+                        
+                        # Add download task for this representation (number-based with SegmentTimeline)
+                        download_tasks.append({
+                            'mpd_url': mpd_url,
+                            'base_url': base_url,
+                            'rep_id': rep_id,
+                            'media_template': media_template,
+                            'init_template': init_template,
+                            'start_number': start_number,
+                            'num_segments': num_segments
+                        })
             else:
                 # Duration-based segments (original logic)
                 duration = int(segment_template.get('duration', 0))
