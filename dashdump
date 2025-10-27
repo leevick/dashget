@@ -66,7 +66,7 @@ def get_representation_info(mpd_path, rep_ids=None):
                 # Check if fMP4
                 mime_type = rep.get('mimeType') or adaptation_set.get('mimeType', '')
                 
-                # Look for segment template
+                # Look for segment template first
                 seg_template = rep.find('.//mpd:SegmentTemplate', namespaces)
                 if seg_template is None:
                     seg_template = adaptation_set.find('.//mpd:SegmentTemplate', namespaces)
@@ -81,8 +81,34 @@ def get_representation_info(mpd_path, rep_ids=None):
                         'mime_type': mime_type,
                         'media_template': media_template,
                         'init_template': init_template,
-                        'start_number': start_number
+                        'start_number': start_number,
+                        'type': 'template'
                     })
+                else:
+                    # Look for SegmentList
+                    seg_list = rep.find('.//mpd:SegmentList', namespaces)
+                    if seg_list is None:
+                        seg_list = adaptation_set.find('.//mpd:SegmentList', namespaces)
+                    
+                    if seg_list is not None:
+                        # Get initialization URL
+                        init_elem = seg_list.find('mpd:Initialization', namespaces)
+                        init_url = init_elem.get('sourceURL') if init_elem is not None else None
+                        
+                        # Get all segment URLs
+                        segment_urls = []
+                        for seg_url_elem in seg_list.findall('mpd:SegmentURL', namespaces):
+                            media_url = seg_url_elem.get('media')
+                            if media_url:
+                                segment_urls.append(media_url)
+                        
+                        representations.append({
+                            'id': rep_id,
+                            'mime_type': mime_type,
+                            'init_url': init_url,
+                            'segment_urls': segment_urls,
+                            'type': 'list'
+                        })
     
     return representations
 
@@ -112,22 +138,18 @@ def find_segment_files(directory, pattern):
 def concat_and_dump_representation(directory, rep_info):
     """Concatenate and dump a single representation using mp4dump."""
     rep_id = rep_info['id']
-    init_template = rep_info['init_template']
-    media_template = rep_info['media_template']
-    start_number = rep_info['start_number']
+    rep_type = rep_info.get('type', 'template')
     
     print(f"\n{'='*60}")
     print(f"Processing Representation: {rep_id}")
     print(f"MIME Type: {rep_info['mime_type']}")
+    print(f"Type: {rep_type}")
     print(f"{'='*60}")
     
     # Save dump file in the same directory as the manifest
     dump_file = os.path.join(directory, f'{rep_id}.dump')
     concat_file = os.path.join(directory, f'{rep_id}.m4s')
     hex_file = os.path.join(directory, f'{rep_id}.hex')
-    
-    # Get init segment path for finding the file
-    init_path = replace_dash_template(init_template, rep_id)
     
     print(f"Dump file: {dump_file}")
     print(f"Concat file: {concat_file}")
@@ -141,6 +163,13 @@ def concat_and_dump_representation(directory, rep_info):
         return False
     
     offset = 0
+    
+    # Get init segment path
+    if rep_type == 'template':
+        init_template = rep_info['init_template']
+        init_path = replace_dash_template(init_template, rep_id)
+    else:  # list
+        init_path = rep_info['init_url']
     
     # Process initialization segment
     init_file = os.path.join(directory, init_path)
@@ -170,17 +199,23 @@ def concat_and_dump_representation(directory, rep_info):
         return False
     
     # Find and process media segments
-    # Convert template to glob pattern
-    # First replace $Number%04d$ (or similar) with just *, then replace $RepresentationID$
-    import re
-    media_pattern = media_template
-    # Replace $Number with optional format specifier with *
-    media_pattern = re.sub(r'\$Number(?:%\d+d)?\$', '*', media_pattern)
-    # Replace $RepresentationID$ with actual ID
-    media_pattern = media_pattern.replace('$RepresentationID$', rep_id)
-    
-    # Find all matching segment files
-    segment_files = find_segment_files(directory, media_pattern)
+    if rep_type == 'template':
+        # Convert template to glob pattern
+        media_template = rep_info['media_template']
+        import re
+        media_pattern = media_template
+        # Replace $Number with optional format specifier with *
+        media_pattern = re.sub(r'\$Number(?:%\d+d)?\$', '*', media_pattern)
+        # Replace $RepresentationID$ with actual ID
+        media_pattern = media_pattern.replace('$RepresentationID$', rep_id)
+        
+        # Find all matching segment files
+        segment_files = find_segment_files(directory, media_pattern)
+    else:  # list
+        # Use explicit segment URLs
+        segment_files = [os.path.join(directory, url) for url in rep_info['segment_urls']]
+        # Filter to only existing files
+        segment_files = [f for f in segment_files if os.path.exists(f)]
     
     # Filter out our own output files (dump, m4s, and hex files in manifest dir)
     output_dump = os.path.join(directory, f'{rep_id}.dump')
