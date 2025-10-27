@@ -122,21 +122,25 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
     for i, line in enumerate(lines):
         line = line.strip()
         
-        # Check for audio media playlists (EXT-X-MEDIA)
+        # Check for media playlists (EXT-X-MEDIA) - audio and subtitles
         if line.startswith('#EXT-X-MEDIA:'):
-            # Extract URI from TYPE=AUDIO
-            if 'TYPE=AUDIO' in line:
+            # Extract URI from TYPE=AUDIO or TYPE=SUBTITLES
+            if 'TYPE=AUDIO' in line or 'TYPE=SUBTITLES' in line:
                 match = re.search(r'URI="([^"]+)"', line)
                 if match:
                     playlist_uri = match.group(1)
                     # Extract language and name for identification
                     lang_match = re.search(r'LANGUAGE="([^"]+)"', line)
                     name_match = re.search(r'NAME="([^"]+)"', line)
-                    variant_id = f"audio-{lang_match.group(1) if lang_match else 'unknown'}"
+                    
+                    # Determine type
+                    media_type = 'audio' if 'TYPE=AUDIO' in line else 'subtitles'
+                    variant_id = f"{media_type}-{lang_match.group(1) if lang_match else 'unknown'}"
+                    
                     media_playlists.append({
                         'uri': playlist_uri,
                         'id': variant_id,
-                        'type': 'audio'
+                        'type': media_type
                     })
         
         # Check for video variant playlists (EXT-X-STREAM-INF)
