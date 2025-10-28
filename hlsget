@@ -86,15 +86,14 @@ def parse_media_playlist(playlist_url, playlist_content):
     
     return init_segment, segments
 
-def download_variant_segments(playlist_url, variant_id, init_segment, segments):
+def download_variant_segments(playlist_url, playlist_relative_path, variant_id, init_segment, segments):
     """Download all segments for a single variant sequentially."""
     downloaded_count = 0
     failed_count = 0
     
-    # Extract the directory path from the playlist URL to prepend to segments
-    # e.g., https://.../a1/prog_index.m3u8 -> a1/
-    parsed_playlist_url = urllib.parse.urlparse(playlist_url)
-    playlist_dir = os.path.dirname(parsed_playlist_url.path).lstrip('/')
+    # Extract the directory path from the relative playlist path
+    # e.g., a1/prog_index.m3u8 -> a1/
+    playlist_dir = os.path.dirname(playlist_relative_path)
     if playlist_dir:
         playlist_dir += '/'
     
@@ -208,6 +207,7 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
             if segments:
                 download_tasks.append({
                     'playlist_url': playlist_url,
+                    'playlist_relative_path': playlist['uri'],
                     'variant_id': playlist['id'],
                     'init_segment': init_segment,
                     'segments': segments
@@ -233,6 +233,7 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
             executor.submit(
                 download_variant_segments,
                 task['playlist_url'],
+                task['playlist_relative_path'],
                 task['variant_id'],
                 task['init_segment'],
                 task['segments']
