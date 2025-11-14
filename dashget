@@ -269,8 +269,15 @@ def download_segmentlist_representation(mpd_url, base_url, rep_id, segment_list)
     thread_safe_print(f"[Rep {rep_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
     return downloaded_count, failed_count
 
-def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
-    """Parse MPD content and download all segments using parallel processing."""
+def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4, rep_ids_filter=None):
+    """Parse MPD content and download all segments using parallel processing.
+    
+    Args:
+        mpd_url: URL of the MPD manifest
+        mpd_content: Content of the MPD manifest
+        max_threads: Maximum number of parallel download threads
+        rep_ids_filter: Set of representation IDs to download (None = download all)
+    """
     # Parse the XML
     root = ET.fromstring(mpd_content)
     
@@ -337,6 +344,10 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
                     for representation in representations:
                         rep_id = representation.get('id')
                         
+                        # Skip if not in filter list
+                        if rep_ids_filter is not None and rep_id not in rep_ids_filter:
+                            continue
+                        
                         # Add download task for this representation (time-based)
                         download_tasks.append({
                             'mpd_url': mpd_url,
@@ -358,6 +369,10 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
                     
                     for representation in representations:
                         rep_id = representation.get('id')
+                        
+                        # Skip if not in filter list
+                        if rep_ids_filter is not None and rep_id not in rep_ids_filter:
+                            continue
                         
                         # Add download task for this representation (number-based with SegmentTimeline)
                         download_tasks.append({
@@ -388,6 +403,10 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
                 for representation in representations:
                     rep_id = representation.get('id')
                     
+                    # Skip if not in filter list
+                    if rep_ids_filter is not None and rep_id not in rep_ids_filter:
+                        continue
+                    
                     # Add download task for this representation (number-based)
                     download_tasks.append({
                         'mpd_url': mpd_url,
@@ -405,6 +424,10 @@ def parse_mpd_and_download_segments(mpd_url, mpd_content, max_threads=4):
             
             for representation in representations:
                 rep_id = representation.get('id')
+                
+                # Skip if not in filter list
+                if rep_ids_filter is not None and rep_id not in rep_ids_filter:
+                    continue
                 
                 # Look for SegmentList in representation first, then adaptation set
                 segment_list_elem = representation.find('.//mpd:SegmentList', ns)
@@ -502,6 +525,8 @@ def main():
                        help='Maximum number of parallel download threads (default: 4)')
     parser.add_argument('--max-threads', type=int, dest='threads',
                        help='Alias for --threads')
+    parser.add_argument('-r', '--reps', '--rep-id', dest='rep_ids',
+                       help='Comma-separated list of representation IDs to download (e.g., "1,2,3" or "audio_eng,video_1080p"). If not specified, all representations will be downloaded.')
     
     args = parser.parse_args()
     
@@ -542,6 +567,12 @@ def main():
     print(f"Downloading DASH manifest from: {dash_url}")
     print(f"Using {max_threads} parallel download threads")
     
+    # Parse representation ID filter
+    rep_ids_filter = None
+    if args.rep_ids:
+        rep_ids_filter = set(rep_id.strip() for rep_id in args.rep_ids.split(','))
+        print(f"Filtering representations: {', '.join(sorted(rep_ids_filter))}")
+    
     try:
         # Download the manifest
         with urllib.request.urlopen(dash_url) as response:
@@ -553,7 +584,7 @@ def main():
         print(f"Manifest saved as: {manifest_filename}")
         
         # Parse and download segments
-        parse_mpd_and_download_segments(dash_url, mpd_content, max_threads)
+        parse_mpd_and_download_segments(dash_url, mpd_content, max_threads, rep_ids_filter)
         
         print("Download complete!")
         
