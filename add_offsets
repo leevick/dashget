@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+Filter to add absolute file offsets to MP4 box dump output.
+Usage: python3 add_offsets.py <file> or cat <file> | python3 add_offsets.py -
+"""
+import sys
+import re
+
+
+def process_dump(input_lines):
+    """Process dump file and add absolute offsets."""
+    # Stack: list of (indent_level, box_offset, header_size, total_size, children_consumed)
+    stack = []
+    file_offset = 0  # Current position in file for top-level boxes
+    
+    for line in input_lines:
+        # Detect indent level (number of leading spaces divided by 2)
+        stripped = line.lstrip()
+        if not stripped:
+            print(line.rstrip())
+            continue
+            
+        indent = len(line) - len(stripped)
+        indent_level = indent // 2
+        
+        # Check if this is a box header line with size=
+        match = re.match(r'^(\s*)\[(\w+)\] size=(\d+)\+(\d+)(.*)$', line.rstrip())
+        
+        if match:
+            spaces, tag, header_size, body_size, rest = match.groups()
+            header_size = int(header_size)
+            body_size = int(body_size)
+            total_size = header_size + body_size
+            
+            # Pop completed siblings/children from stack and update parent's children_consumed
+            while stack and stack[-1][0] >= indent_level:
+                completed = stack.pop()
+                # Update parent's children consumed
+                if stack:
+                    parent = stack[-1]
+                    stack[-1] = (parent[0], parent[1], parent[2], parent[3], parent[4] + completed[3])
+            
+            # Calculate this box's offset
+            if indent_level == 0:
+                # Top-level box
+                box_offset = file_offset
+                file_offset += total_size
+            else:
+                # Child box - starts after parent's header + all previous siblings
+                if stack:
+                    parent_level, parent_offset, parent_header, parent_total, children_consumed = stack[-1]
+                    box_offset = parent_offset + parent_header + children_consumed
+                else:
+                    box_offset = 0  # Should not happen
+            
+            # Output the line with absolute offset appended
+            print(f"{spaces}[{tag}] size={header_size}+{body_size}{rest}, offset=0x{box_offset:08x}")
+            
+            # Push this box onto stack with 0 children consumed initially
+            stack.append((indent_level, box_offset, header_size, total_size, 0))
+        else:
+            # Not a box header line, just print as-is
+            print(line.rstrip())
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] != '-':
+        # Read from file
+        with open(sys.argv[1], 'r') as f:
+            process_dump(f)
+    else:
+        # Read from stdin
+        process_dump(sys.stdin)
+
+
+if __name__ == '__main__':
+    main()
