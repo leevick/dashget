@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
 Filter to add absolute file offsets to MP4 box dump output.
-Usage: python3 add_offsets.py <file> or cat <file> | python3 add_offsets.py -
+Usage: python3 add_offsets.py <file> [--initial-offset OFFSET]
+       cat <file> | python3 add_offsets.py - [--initial-offset OFFSET]
 """
 import sys
 import re
+import argparse
 
 
-def process_dump(input_lines):
-    """Process dump file and add absolute offsets."""
+def process_dump(input_lines, initial_offset=0):
+    """Process dump file and add absolute offsets.
+    
+    Args:
+        input_lines: Lines of the dump file to process
+        initial_offset: Initial offset to add to all calculated offsets (default: 0)
+    """
     # Stack: list of (indent_level, box_offset, header_size, total_size, children_consumed)
     stack = []
-    file_offset = 0  # Current position in file for top-level boxes
+    file_offset = initial_offset  # Current position in file for top-level boxes
     
     for line in input_lines:
         # Detect indent level (number of leading spaces divided by 2)
@@ -64,13 +71,38 @@ def process_dump(input_lines):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] != '-':
+    parser = argparse.ArgumentParser(
+        description='Add absolute file offsets to MP4 box dump output',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='Examples:\n'
+               '  %(prog)s input.dump\n'
+               '  %(prog)s input.dump --initial-offset 0x1000\n'
+               '  cat input.dump | %(prog)s - --initial-offset 4096'
+    )
+    parser.add_argument('input', nargs='?', default='-',
+                       help='Input dump file (use "-" or omit for stdin)')
+    parser.add_argument('-i', '--initial-offset', type=str, default='0',
+                       help='Initial offset to add to all offsets (can be decimal or hex with 0x prefix, default: 0)')
+    
+    args = parser.parse_args()
+    
+    # Parse initial offset (support both decimal and hex)
+    try:
+        if args.initial_offset.startswith('0x') or args.initial_offset.startswith('0X'):
+            initial_offset = int(args.initial_offset, 16)
+        else:
+            initial_offset = int(args.initial_offset)
+    except ValueError:
+        print(f"Error: Invalid initial offset value: {args.initial_offset}", file=sys.stderr)
+        sys.exit(1)
+    
+    if args.input != '-':
         # Read from file
-        with open(sys.argv[1], 'r') as f:
-            process_dump(f)
+        with open(args.input, 'r') as f:
+            process_dump(f, initial_offset)
     else:
         # Read from stdin
-        process_dump(sys.stdin)
+        process_dump(sys.stdin, initial_offset)
 
 
 if __name__ == '__main__':
