@@ -86,7 +86,7 @@ def parse_media_playlist(playlist_url, playlist_content):
     
     return init_segment, segments
 
-def download_variant_segments(playlist_url, playlist_relative_path, variant_id, init_segment, segments):
+def download_variant_segments(playlist_url, playlist_relative_path, variant_id, init_segment, segments, dest_root='.'):
     """Download all segments for a single variant sequentially."""
     downloaded_count = 0
     failed_count = 0
@@ -100,8 +100,8 @@ def download_variant_segments(playlist_url, playlist_relative_path, variant_id, 
     # Download initialization segment if exists
     if init_segment:
         init_url = urllib.parse.urljoin(playlist_url, init_segment)
-        # Prepend the playlist directory to create the relative path
-        init_path = playlist_dir + init_segment
+        # Save init segment under destination root preserving playlist directory
+        init_path = os.path.join(dest_root, playlist_dir, init_segment) if playlist_dir else os.path.join(dest_root, init_segment)
         if download_file(init_url, init_path):
             downloaded_count += 1
         else:
@@ -110,8 +110,8 @@ def download_variant_segments(playlist_url, playlist_relative_path, variant_id, 
     # Download media segments
     for segment in segments:
         segment_url = urllib.parse.urljoin(playlist_url, segment)
-        # Prepend the playlist directory to create the relative path
-        segment_path = playlist_dir + segment
+        # Save segment under destination root preserving playlist directory
+        segment_path = os.path.join(dest_root, playlist_dir, segment) if playlist_dir else os.path.join(dest_root, segment)
         if download_file(segment_url, segment_path):
             downloaded_count += 1
         else:
@@ -121,8 +121,12 @@ def download_variant_segments(playlist_url, playlist_relative_path, variant_id, 
     thread_safe_print(f"[Variant {variant_id}] Complete: {downloaded_count} downloaded, {failed_count} failed")
     return downloaded_count, failed_count
 
-def parse_master_playlist_and_download(master_url, master_content, max_threads=4):
-    """Parse master playlist and download all variants using parallel processing."""
+def parse_master_playlist_and_download(master_url, master_content, max_threads=4, manifests_only=False, dest_root='.'):
+    """Parse master playlist and download all variants using parallel processing.
+
+    If `manifests_only` is True, only save the master and media playlists
+    and do not download media segments or init segments.
+    """
     lines = master_content.strip().split('\n')
     
     # Collect all media playlists (variants and audio)
@@ -188,13 +192,13 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
                 playlist_content = response.read().decode('utf-8')
             
             # Use the relative URI from the master playlist as the local filename
-            # This preserves the directory structure relative to the master playlist
-            playlist_filename = playlist['uri']
+            # and prepend the destination root so all files are saved under dest_root
+            playlist_filename = os.path.join(dest_root, playlist['uri'])
 
             # Ensure parent directory exists before writing
-            playlist_dir = os.path.dirname(playlist_filename)
-            if playlist_dir:
-                os.makedirs(playlist_dir, exist_ok=True)
+            playlist_dirname = os.path.dirname(playlist_filename)
+            if playlist_dirname:
+                os.makedirs(playlist_dirname, exist_ok=True)
 
             # Save the media playlist
             with open(playlist_filename, 'w') as f:
@@ -203,19 +207,23 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
             
             # Parse segments
             init_segment, segments = parse_media_playlist(playlist_url, playlist_content)
-            
-            if segments:
-                download_tasks.append({
-                    'playlist_url': playlist_url,
-                    'playlist_relative_path': playlist['uri'],
-                    'variant_id': playlist['id'],
-                    'init_segment': init_segment,
-                    'segments': segments
-                })
-                thread_safe_print(f"[{playlist['id']}] Found {len(segments)} segments" + 
-                                (f" (+ 1 init segment)" if init_segment else ""))
+
+            # If only manifests requested, do not queue any segment downloads
+            if manifests_only:
+                thread_safe_print(f"[Manifest-only] Saved {playlist_filename} (contains {len(segments)} segments)")
             else:
-                thread_safe_print(f"Warning: No segments found in {playlist['id']}")
+                if segments:
+                    download_tasks.append({
+                        'playlist_url': playlist_url,
+                        'playlist_relative_path': playlist['uri'],
+                        'variant_id': playlist['id'],
+                        'init_segment': init_segment,
+                        'segments': segments
+                    })
+                    thread_safe_print(f"[{playlist['id']}] Found {len(segments)} segments" + 
+                                    (f" (+ 1 init segment)" if init_segment else ""))
+                else:
+                    thread_safe_print(f"Warning: No segments found in {playlist['id']}")
                 
         except Exception as e:
             thread_safe_print(f"Error fetching media playlist {playlist['id']}: {e}")
@@ -224,32 +232,38 @@ def parse_master_playlist_and_download(master_url, master_content, max_threads=4
     total_downloaded = 0
     total_failed = 0
     
-    thread_safe_print(f"\nStarting parallel downloads with {min(max_threads, len(download_tasks))} threads...")
-    thread_safe_print(f"Total variants to download: {len(download_tasks)}")
-    
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        # Submit all download tasks
-        future_to_task = {
-            executor.submit(
-                download_variant_segments,
-                task['playlist_url'],
-                task['playlist_relative_path'],
-                task['variant_id'],
-                task['init_segment'],
-                task['segments']
-            ): task for task in download_tasks
-        }
+    # If user requested manifests only, skip downloading segments
+    if manifests_only:
+        thread_safe_print("\nManifests-only mode enabled: skipping segment downloads.")
+        thread_safe_print(f"Total media playlists saved: {len(media_playlists)}")
+    else:
+        thread_safe_print(f"\nStarting parallel downloads with {min(max_threads, len(download_tasks))} threads...")
+        thread_safe_print(f"Total variants to download: {len(download_tasks)}")
         
-        # Process completed tasks
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            try:
-                downloaded, failed = future.result()
-                total_downloaded += downloaded
-                total_failed += failed
-            except Exception as e:
-                thread_safe_print(f"[Variant {task['variant_id']}] Exception occurred: {e}")
-                total_failed += 1
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            # Submit all download tasks
+            future_to_task = {
+                executor.submit(
+                    download_variant_segments,
+                    task['playlist_url'],
+                    task['playlist_relative_path'],
+                    task['variant_id'],
+                    task['init_segment'],
+                    task['segments'],
+                    dest_root
+                ): task for task in download_tasks
+            }
+            
+            # Process completed tasks
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    downloaded, failed = future.result()
+                    total_downloaded += downloaded
+                    total_failed += failed
+                except Exception as e:
+                    thread_safe_print(f"[Variant {task['variant_id']}] Exception occurred: {e}")
+                    total_failed += 1
     
     thread_safe_print(f"\nDownload summary:")
     thread_safe_print(f"Total files downloaded: {total_downloaded}")
@@ -262,6 +276,10 @@ def main():
                        help='Maximum number of parallel download threads (default: 4)')
     parser.add_argument('--max-threads', type=int, dest='threads',
                        help='Alias for --threads')
+    parser.add_argument('-M', '--manifests-only', action='store_true', dest='manifests_only',
+                       help='Only download master and media playlists (do not download media segments)')
+    parser.add_argument('-o', '--outdir', dest='outdir', default='.',
+                       help='Destination root folder for downloads (default: current directory)')
     
     args = parser.parse_args()
     
@@ -274,6 +292,10 @@ def main():
     
     hls_url = args.hls_url
     max_threads = args.threads
+    output_dir = args.outdir or '.'
+    # Ensure output directory exists
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     
     # Extract manifest filename from URL
     parsed_url = urllib.parse.urlparse(hls_url)
@@ -307,13 +329,17 @@ def main():
         with urllib.request.urlopen(hls_url) as response:
             master_content = response.read().decode('utf-8')
         
-        # Save master playlist to current directory
-        with open(manifest_filename, 'w') as f:
+        # Save master playlist to output directory
+        master_path = os.path.join(output_dir, manifest_filename)
+        master_dir = os.path.dirname(master_path)
+        if master_dir:
+            os.makedirs(master_dir, exist_ok=True)
+        with open(master_path, 'w') as f:
             f.write(master_content)
-        print(f"Master playlist saved as: {manifest_filename}")
-        
-        # Parse and download all variants and segments
-        parse_master_playlist_and_download(hls_url, master_content, max_threads)
+        print(f"Master playlist saved as: {master_path}")
+
+        # Parse and download all variants and segments (or only manifests)
+        parse_master_playlist_and_download(hls_url, master_content, max_threads, manifests_only=args.manifests_only, dest_root=output_dir)
         
         print("Download complete!")
         
